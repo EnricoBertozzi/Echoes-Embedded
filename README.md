@@ -8,4 +8,4 @@ O projeto de um conjunto consiste no desenvolvimento de um simulador canino de b
 
 # Tecnologias
 * C++.
-* Arduino IDE..
+* ESP-IDF
