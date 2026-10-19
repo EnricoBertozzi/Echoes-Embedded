@@ -1,0 +1,2 @@
+# Requerido pelo framework Arduino (esp32-arduino exige 1000 Hz)
+CONFIG_FREERTOS_HZ=1000
