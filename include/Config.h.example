@@ -1,0 +1,3 @@
+#pragma once
+
+#define SCENARIOS_LIMIT 100

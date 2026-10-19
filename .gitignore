@@ -1,5 +1,6 @@
 # Prerequisites
 *.d
+include/Config.h
 
 # Compiled Object files
 *.slo
