@@ -3,8 +3,10 @@
 #include <cstdint>
 #include <ctime>
 
+using ScenarioId = uint8_t[16];
+
 struct Scenario {
-  uint8_t id[16];
+  ScenarioId id;
   char audio[32];
   uint8_t pointId[16];
   time_t validUntil;
