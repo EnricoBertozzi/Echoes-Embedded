@@ -6,7 +6,7 @@
 #include <WiFi.h>
 #include <atomic>
 #include <freertos/FreeRTOS.h>
-#include <freertos/tasks.h>
+#include <freertos/task.h>
 
 class EspWifiSTA : public WifiSTA {
 public:
