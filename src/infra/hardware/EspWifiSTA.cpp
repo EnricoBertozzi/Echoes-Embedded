@@ -1,4 +1,5 @@
 #include "infra/hardware/EspWifiSTA.hpp"
+#include <esp_wifi.h>
 #include <vector>
 
 EspWifiSTA::EspWifiSTA() {
@@ -102,8 +103,11 @@ void EspWifiSTA::startScan() {
 }
 
 void EspWifiSTA::stopScan() {
-  if (!scanning) {
+  if (!scanning.exchange(false)) {
     return;
+  }
+  if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
+    esp_wifi_scan_stop();
   }
   WiFi.scanDelete();
   scanning = false;
@@ -124,7 +128,14 @@ void EspWifiSTA::processScan() {
   }
 
   int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING || n == WIFI_SCAN_FAILED) {
+  if (n == WIFI_SCAN_RUNNING) {
+    return;
+  }
+  if (n == WIFI_SCAN_FAILED) {
+    WiFi.scanDelete();
+    if (scanning) {
+      WiFi.scanNetworks(true, true);
+    }
     return;
   }
   std::vector<WifiScanDto> networks;
