@@ -62,6 +62,9 @@ void EspWifiSTA::connectStatic(const WifiConnectDto &connectCmd) {
 
   if (failParseIps) {
     statusNetwork.status = WifiStatus::WIFI_ERROR;
+    for (auto &o : observers) {
+      o->onError(statusNetwork);
+    }
     return;
   }
 

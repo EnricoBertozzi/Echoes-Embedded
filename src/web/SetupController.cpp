@@ -92,3 +92,46 @@ String SetupController::getContentType(String filename) {
     return "image/x-icon";
   return "text/plain";
 }
+
+void SetupController::onConnect(const WifiScanDto &connectDto) {
+  updateStatus(connectDto, WifiStatus::WIFI_CONNECTED);
+}
+
+void SetupController::onConnecting(const WifiScanDto &connectDto) {
+  updateStatus(connectDto, WifiStatus::WIFI_CONNECTING);
+}
+
+void SetupController::onError(const WifiScanDto &connectDto) {
+  updateStatus(connectDto, WifiStatus::WIFI_ERROR);
+}
+
+void SetupController::onDisconnect(const WifiScanDto &connectDto) {
+  updateStatus(connectDto, WifiStatus::WIFI_NONE);
+}
+
+void SetupController::updateStatus(const WifiScanDto &connectDto,
+                                   WifiStatus status) {
+  JsonDocument doc;
+  doc["ssid"] = connectDto.ssid;
+  doc["status"] = static_cast<int>(connectDto.status);
+  doc["rssi"] = connectDto.rssi;
+  doc["secure"] = connectDto.secure;
+  String json;
+  serializeJson(doc, json);
+  events.send(json, "status");
+}
+
+void SetupController::onScan(const std::vector<WifiScanDto> &scanList) {
+  JsonDocument doc;
+  JsonArray array = doc.to<JsonArray>();
+  for (auto &network : scanList) {
+    JsonObject o = array.add<JsonObject>();
+    o["ssid"] = network.ssid;
+    o["secure"] = network.secure;
+    o["rssi"] = network.rssi;
+    o["status"] = static_cast<int>(network.status);
+  }
+  String json;
+  serializeJson(doc, json);
+  events.send(json, "list");
+}
