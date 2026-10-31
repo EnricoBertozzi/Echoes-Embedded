@@ -3,6 +3,8 @@
 #include "application/hardware/WifiSTA.hpp"
 #include "application/hardware/WifiSTAObserver.hpp"
 #include "application/hardware/dto/WifiScanDto.hpp"
+#include <WiFi.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/tasks.h>
 
@@ -23,10 +25,14 @@ public:
 
 private:
   std::vector<WifiSTAObserver *> observers;
-  bool scanning;
+  std::atomic<bool> scanning{false};
   TaskHandle_t scanTask;
   WifiScanDto statusNetwork;
 
+  void connectDHCP(const WifiConnectDto &connectCmd);
+  void connectStatic(const WifiConnectDto &connectCmd);
+  void connect(const std::string &ssid, const std::string &pass);
   void processScan();
   WifiScanDto processScanItem(int i);
+  void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 };

@@ -9,6 +9,7 @@ public:
   ~WifiSTAObserver() = default;
 
   virtual void onConnect(const WifiConnectDto &connectDto) {}
+  virtual void onError(const WifiConnectDto &connectDto) {}
   virtual void onDisconnect(const WifiConnectDto &connectDto) {}
   virtual void onScan(const std::vector<WifiScanDto> &scanList) {}
 };
