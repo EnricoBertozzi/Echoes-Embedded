@@ -1,9 +1,18 @@
 #include "web/SetupController.hpp"
+#include "application/hardware/dto/WifiConnectDto.hpp"
+#include <ArduinoJson.h>
 #include <LittleFS.h>
 
-SetupController::SetupController() {}
+SetupController::~SetupController() { delete setupHandler; }
 
 void SetupController::setup() {
+  setupHandler = new AsyncCallbackJsonWebHandler(
+      "/wifi-setup", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        this->handleSetup(request, json);
+      });
+  setupHandler->setMethod(HTTP_POST);
+  setupHandler->setMaxContentLength(2048);
+  server.addHandler(setupHandler);
   server.addHandler(&events);
   server.onNotFound(
       [this](AsyncWebServerRequest *request) { this->handleFile(request); });
@@ -21,6 +30,29 @@ void SetupController::stop() {
     return;
   }
   server.end();
+}
+
+void SetupController::handleSetup(AsyncWebServerRequest *request,
+                                  JsonVariant &json) {
+  if (request->method() != HTTP_POST) {
+    request->send(405, "text/plain", "Method not allowed");
+    return;
+  }
+  JsonObject obj = json.as<JsonObject>();
+  String ssid = obj["ssid"];
+  String password = obj["password"];
+  String ip = obj["ip"];
+  String gateway = obj["gateway"];
+  String subnet = obj["subnet"];
+  WifiConnectDto dto{ssid.c_str(), password.c_str(), ip.c_str(),
+                     gateway.c_str(), subnet.c_str()};
+
+  wifiSTA.connect(dto);
+
+  auto *response = request->beginResponse(200);
+  response->addHeader("Cache-Control", "no-store");
+  response->addHeader("Connection", "close");
+  request->send(response);
 }
 
 void SetupController::handleFile(AsyncWebServerRequest *request) {
