@@ -37,6 +37,9 @@ void EspWifiSTA::connect(const WifiConnectDto &connectDto) {
   statusNetwork.ssid = connectDto.ssid;
   statusNetwork.status = WifiStatus::WIFI_CONNECTING;
   statusNetwork.secure = connectDto.password != "";
+  for (auto &o : observers) {
+    o->onConnecting(statusNetwork);
+  }
   if (connectDto.isDHCP())
     connectDHCP(connectDto);
   else
