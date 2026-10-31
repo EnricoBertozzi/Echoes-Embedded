@@ -69,6 +69,11 @@ void SetupController::handleFile(AsyncWebServerRequest *request) {
   AsyncWebServerResponse *response =
       request->beginResponse(LittleFS, path, contentType);
 
+  if (!response) {
+    request->send(404, "text/plain", "Not Found");
+    return;
+  }
+
   response->addHeader("Cache-Control", "no-store");
   response->addHeader("Connection", "close");
 

@@ -3,6 +3,7 @@
 #include "infra/logging/WifiSTALogger.hpp"
 #include "web/SetupController.hpp"
 #include <Arduino.h>
+#include <LittleFS.h>
 
 EspWifiAP wifiAP;
 EspWifiSTA wifiSTA;
@@ -16,9 +17,20 @@ extern "C" void app_main(void) {
   wifiSTA.setup();
   wifiAP.start();
 
+  if (!LittleFS.begin(false)) {
+    Serial.println("LittleFS mount failed!");
+    while (true) {
+      delay(1000);
+    }
+  }
+
   wifiSTA.registerObserver(&staLogger);
   wifiSTA.registerObserver(&setupController);
 
+  setupController.setup();
+  setupController.start();
+
   while (true) {
+    delay(1000);
   }
 }
