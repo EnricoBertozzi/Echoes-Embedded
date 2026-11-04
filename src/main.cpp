@@ -1,3 +1,4 @@
+#include "application/service/ScanService.hpp"
 #include "infra/hardware/EspWifiAP.hpp"
 #include "infra/hardware/EspWifiSTA.hpp"
 #include "infra/hardware/WifiIndicator.hpp"
@@ -16,6 +17,7 @@ extern "C" void app_main(void) {
   WifiSTALogger staLogger;
   SetupController setupController{wifiSTA};
   WifiIndicator wifiIndicator;
+  ScanService scanService{wifiSTA};
 
   Serial.begin(115200);
   wifiSTA.setup();
@@ -31,6 +33,7 @@ extern "C" void app_main(void) {
   wifiSTA.registerObserver(&staLogger);
   wifiSTA.registerObserver(&setupController);
   wifiSTA.registerObserver(&wifiIndicator);
+  wifiAP.registerObserver(&scanService);
 
   setupController.setup();
   setupController.start();
