@@ -39,11 +39,14 @@ void SetupController::handleSetup(AsyncWebServerRequest *request,
     return;
   }
   JsonObject obj = json.as<JsonObject>();
-  String ssid = obj["ssid"];
-  String password = obj["password"];
-  String ip = obj["ip"];
-  String gateway = obj["gateway"];
-  String subnet = obj["subnet"];
+  // Missing keys must become empty strings. A plain `String x = obj["key"]`
+  // serializes a null JsonVariant to the literal "null", which would make
+  // isDHCP() false and send a DHCP request down the static-IP path.
+  String ssid = obj["ssid"] | "";
+  String password = obj["password"] | "";
+  String ip = obj["ip"] | "";
+  String gateway = obj["gateway"] | "";
+  String subnet = obj["subnet"] | "";
   WifiConnectDto dto{ssid.c_str(), password.c_str(), ip.c_str(),
                      gateway.c_str(), subnet.c_str()};
 

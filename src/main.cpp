@@ -1,17 +1,19 @@
 #include "infra/hardware/EspWifiAP.hpp"
 #include "infra/hardware/EspWifiSTA.hpp"
+#include "infra/hardware/WifiIndicator.hpp"
 #include "infra/logging/WifiSTALogger.hpp"
 #include "web/SetupController.hpp"
 #include <Arduino.h>
 #include <LittleFS.h>
 
-EspWifiAP wifiAP;
-EspWifiSTA wifiSTA;
-WifiSTALogger staLogger;
-SetupController setupController{wifiSTA};
-
 extern "C" void app_main(void) {
   initArduino();
+
+  EspWifiAP wifiAP;
+  EspWifiSTA wifiSTA;
+  WifiSTALogger staLogger;
+  SetupController setupController{wifiSTA};
+  WifiIndicator wifiIndicator;
 
   Serial.begin(115200);
   wifiSTA.setup();
@@ -26,6 +28,7 @@ extern "C" void app_main(void) {
 
   wifiSTA.registerObserver(&staLogger);
   wifiSTA.registerObserver(&setupController);
+  wifiSTA.registerObserver(&wifiIndicator);
 
   setupController.setup();
   setupController.start();
