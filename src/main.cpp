@@ -1,6 +1,7 @@
 #include "infra/hardware/EspWifiAP.hpp"
 #include "infra/hardware/EspWifiSTA.hpp"
 #include "infra/hardware/WifiIndicator.hpp"
+#include "infra/hardware/WifiSTAProxy.hpp"
 #include "infra/logging/WifiSTALogger.hpp"
 #include "web/SetupController.hpp"
 #include <Arduino.h>
@@ -10,7 +11,8 @@ extern "C" void app_main(void) {
   initArduino();
 
   EspWifiAP wifiAP;
-  EspWifiSTA wifiSTA;
+  EspWifiSTA espWifiSTA;
+  WifiSTAProxy wifiSTA{espWifiSTA};
   WifiSTALogger staLogger;
   SetupController setupController{wifiSTA};
   WifiIndicator wifiIndicator;

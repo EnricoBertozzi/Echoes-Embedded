@@ -3,8 +3,6 @@
 #include <vector>
 
 EspWifiSTA::EspWifiSTA() {
-  connectQueue = xQueueCreate(1, sizeof(WifiConnectDto *));
-  xTaskCreate(connectTaskEntry, "wifi-connect", 4096, this, 2, &connectTask);
   xTaskCreate(
       [](void *param) {
         auto *wifiSTA = static_cast<EspWifiSTA *>(param);
@@ -22,18 +20,6 @@ EspWifiSTA::EspWifiSTA() {
 
 EspWifiSTA::~EspWifiSTA() {
   disconnect();
-  if (connectTask != nullptr) {
-    vTaskDelete(connectTask);
-    connectTask = nullptr;
-  }
-  if (connectQueue != nullptr) {
-    WifiConnectDto *pending = nullptr;
-    while (xQueueReceive(connectQueue, &pending, 0) == pdTRUE) {
-      delete pending;
-    }
-    vQueueDelete(connectQueue);
-    connectQueue = nullptr;
-  }
   if (scanTask != nullptr) {
     vTaskDelete(scanTask);
     scanTask = nullptr;
@@ -48,9 +34,7 @@ void EspWifiSTA::setup() {
 }
 
 void EspWifiSTA::connect(const WifiConnectDto &connectDto) {
-  if (connecting.exchange(true)) {
-    return;
-  }
+  stopScan();
 
   statusNetwork.ssid = connectDto.ssid;
   statusNetwork.status = WifiStatus::WIFI_CONNECTING;
@@ -59,32 +43,6 @@ void EspWifiSTA::connect(const WifiConnectDto &connectDto) {
     o->onConnecting(statusNetwork);
   }
 
-  auto *request = new WifiConnectDto(connectDto);
-  if (connectQueue == nullptr ||
-      xQueueSend(connectQueue, &request, 0) != pdTRUE) {
-    delete request;
-    connecting.store(false);
-    statusNetwork.status = WifiStatus::WIFI_ERROR;
-    for (auto &o : observers) {
-      o->onError(statusNetwork);
-    }
-  }
-}
-
-void EspWifiSTA::connectTaskEntry(void *param) {
-  auto *self = static_cast<EspWifiSTA *>(param);
-  WifiConnectDto *request = nullptr;
-  while (true) {
-    if (xQueueReceive(self->connectQueue, &request, portMAX_DELAY) == pdTRUE) {
-      self->performConnect(*request);
-      delete request;
-      self->connecting.store(false);
-    }
-  }
-}
-
-void EspWifiSTA::performConnect(const WifiConnectDto &connectDto) {
-  stopScan();
   if (connectDto.isDHCP())
     connectDHCP(connectDto);
   else
@@ -92,10 +50,6 @@ void EspWifiSTA::performConnect(const WifiConnectDto &connectDto) {
 }
 
 void EspWifiSTA::connectDHCP(const WifiConnectDto &connectCmd) {
-  // 0.0.0.0 tells the Arduino core to stop the DHCP client, clear the static
-  // address and start DHCP again. Do not use INADDR_NONE (255.255.255.255)
-  // here: it leaves the DHCP client stopped and marks the interface as
-  // static, so the STA associates but never receives an IP.
   WiFi.config(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0),
               IPAddress(0, 0, 0, 0));
   connect(connectCmd.ssid, connectCmd.password);
@@ -235,9 +189,6 @@ void EspWifiSTA::onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     }
     break;
   case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-    // While a connection attempt is in progress the worker task owns the
-    // outcome (it reports onError on timeout). Ignoring this event avoids a
-    // spurious "disconnected" notification and keeps the SSID for the error.
     if (statusNetwork.status == WifiStatus::WIFI_CONNECTING) {
       break;
     }

@@ -6,6 +6,7 @@ class WifiSTA {
 public:
   virtual ~WifiSTA() = default;
 
+  virtual void setup() {}
   virtual void connect(const WifiConnectDto &connectDto) = 0;
   virtual void disconnect() = 0;
   virtual bool isConnected() = 0;

@@ -6,14 +6,13 @@
 #include <WiFi.h>
 #include <atomic>
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
 #include <freertos/task.h>
 
 class EspWifiSTA : public WifiSTA {
 public:
   EspWifiSTA();
   ~EspWifiSTA() override;
-  void setup();
+  void setup() override;
   void connect(const WifiConnectDto &connectDto) override;
   void disconnect() override;
   bool isConnected() override;
@@ -27,14 +26,9 @@ public:
 private:
   std::vector<WifiSTAObserver *> observers;
   std::atomic<bool> scanning{false};
-  std::atomic<bool> connecting{false};
   TaskHandle_t scanTask{nullptr};
-  TaskHandle_t connectTask{nullptr};
-  QueueHandle_t connectQueue{nullptr};
   WifiScanDto statusNetwork;
 
-  static void connectTaskEntry(void *param);
-  void performConnect(const WifiConnectDto &connectDto);
   void connectDHCP(const WifiConnectDto &connectCmd);
   void connectStatic(const WifiConnectDto &connectCmd);
   void connect(const std::string &ssid, const std::string &pass);
