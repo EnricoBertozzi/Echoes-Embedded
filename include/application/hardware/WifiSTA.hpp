@@ -13,6 +13,6 @@ public:
   virtual bool isScanning() = 0;
   virtual void startScan() = 0;
   virtual void stopScan() = 0;
-  virtual void registerObserver(WifiSTAObserver *observer);
-  virtual void unregisterObserver(WifiSTAObserver *observer);
+  virtual void registerObserver(WifiSTAObserver *observer) = 0;
+  virtual void unregisterObserver(WifiSTAObserver *observer) = 0;
 };

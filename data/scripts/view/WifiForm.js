@@ -41,7 +41,7 @@ export class WifiForm {
 
     const numbers = ip.split('.');
     numbers[3] = '1';
-    
+
     this.#wifiGateway.value = numbers.join('.');
   }
 
@@ -54,18 +54,25 @@ export class WifiForm {
     this.#wifiModal.addEventListener('click', ev => {
       if (ev.target !== this.#wifiModal)
         return;
-      this.#wifiModal.style.display = 'none';
-      this.#resetForm();
+      this.#closeModal();
     })
     this.#wifiModalCancel.addEventListener('click', () => {
-      this.#wifiModal.style.display = 'none';
-      this.#resetForm();
+      this.#closeModal();
     })
   }
 
   #resetForm() {
     this.#wifiConnect.reset();
     this.#wifiSubnet.value = '255.255.255.0';
+  }
+
+  #closeModal() {
+    this.#wifiModal.style.display = 'none';
+    this.#resetForm();
+  }
+
+  clearError() {
+    this.#wifiError.textContent = '';
   }
 
   #setupConnectRequest() {
@@ -76,8 +83,12 @@ export class WifiForm {
   }
 
   async #requestWifiConnection() {
+    this.clearError();
     try {
       await this.#_requestWifiConnection();
+      // Only close the modal when the request was accepted, otherwise the
+      // error message would be written to a hidden element.
+      this.#closeModal();
     } catch(err) {
       this.#wifiError.textContent = err.message;
     }
@@ -91,11 +102,11 @@ export class WifiForm {
     const gateway = formData.get('gateway');
     const subnet = formData.get('subnet');
 
+    if (!ssid)
+      throw new Error('Digite o SSID da rede');
     if (ip)
       this.#validateAdvanced(ip, gateway, subnet);
 
-    this.#wifiModal.style.display = 'none';
-    this.#resetForm();
     const wifiConnectDto = new WifiConnectDto(ssid, password, ip, gateway, subnet);
     await this.#wifiManager.connectToWifi(wifiConnectDto);
   }

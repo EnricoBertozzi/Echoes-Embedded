@@ -12,7 +12,7 @@ enum class WifiStatus {
 
 struct WifiScanDto {
   std::string ssid;
-  bool secure;
-  WifiStatus status;
-  int32_t rssi;
+  bool secure{false};
+  WifiStatus status{WifiStatus::WIFI_NONE};
+  int32_t rssi{0};
 };

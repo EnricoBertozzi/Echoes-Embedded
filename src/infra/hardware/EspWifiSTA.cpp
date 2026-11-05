@@ -1,5 +1,6 @@
 #include "infra/hardware/EspWifiSTA.hpp"
 #include <esp_wifi.h>
+#include <algorithm>
 #include <vector>
 
 EspWifiSTA::EspWifiSTA() {
@@ -9,10 +10,8 @@ EspWifiSTA::EspWifiSTA() {
         while (true) {
           if (wifiSTA->scanning) {
             wifiSTA->processScan();
-            vTaskDelay(pdMS_TO_TICKS(50));
-          } else {
-            vTaskDelay(pdMS_TO_TICKS(500));
           }
+          vTaskDelay(pdMS_TO_TICKS(250));
         }
       },
       "scan-task", 4096, this, 1, &scanTask);
@@ -36,11 +35,17 @@ void EspWifiSTA::setup() {
 void EspWifiSTA::connect(const WifiConnectDto &connectDto) {
   stopScan();
 
-  statusNetwork.ssid = connectDto.ssid;
-  statusNetwork.status = WifiStatus::WIFI_CONNECTING;
-  statusNetwork.secure = connectDto.password != "";
-  for (auto &o : observers) {
-    o->onConnecting(statusNetwork);
+  WifiScanDto status;
+  {
+    std::lock_guard<std::mutex> lock(statusMutex);
+    statusNetwork.ssid = connectDto.ssid;
+    statusNetwork.status = WifiStatus::WIFI_CONNECTING;
+    statusNetwork.secure = !connectDto.password.empty();
+    statusNetwork.rssi = 0;
+    status = statusNetwork;
+  }
+  for (auto *o : lockedObservers()) {
+    o->onConnecting(status);
   }
 
   if (connectDto.isDHCP())
@@ -65,9 +70,9 @@ void EspWifiSTA::connectStatic(const WifiConnectDto &connectCmd) {
                       !subnetParsed.fromString(connectCmd.subnet.c_str());
 
   if (failParseIps) {
-    statusNetwork.status = WifiStatus::WIFI_ERROR;
-    for (auto &o : observers) {
-      o->onError(statusNetwork);
+    const WifiScanDto status = setErrorStatus();
+    for (auto *o : lockedObservers()) {
+      o->onError(status);
     }
     return;
   }
@@ -98,9 +103,9 @@ void EspWifiSTA::connect(const std::string &ssid, const std::string &pass) {
     WiFi.setAutoReconnect(true);
     vTaskDelay(pdMS_TO_TICKS(200));
   } else {
-    statusNetwork.status = WifiStatus::WIFI_ERROR;
-    for (auto &o : observers) {
-      o->onError(statusNetwork);
+    const WifiScanDto status = setErrorStatus();
+    for (auto *o : lockedObservers()) {
+      o->onError(status);
     }
   }
 }
@@ -112,11 +117,7 @@ bool EspWifiSTA::isConnected() { return WiFi.isConnected(); }
 bool EspWifiSTA::isScanning() { return scanning; }
 
 void EspWifiSTA::startScan() {
-  if (scanning) {
-    return;
-  }
-
-  WiFi.scanNetworks(true, true);
+  // The scan task picks this up and runs blocking scans while it is set.
   scanning = true;
 }
 
@@ -124,20 +125,38 @@ void EspWifiSTA::stopScan() {
   if (!scanning.exchange(false)) {
     return;
   }
-  if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
-    esp_wifi_scan_stop();
-  }
+  // Aborts a blocking scan in progress, if any; the scan task discards
+  // the partial result because `scanning` is already false.
+  esp_wifi_scan_stop();
+  std::lock_guard<std::mutex> lock(scanMutex);
   WiFi.scanDelete();
-  scanning = false;
 }
 
 void EspWifiSTA::registerObserver(WifiSTAObserver *observer) {
+  std::lock_guard<std::mutex> lock(observersMutex);
   observers.push_back(observer);
 }
 
 void EspWifiSTA::unregisterObserver(WifiSTAObserver *observer) {
+  std::lock_guard<std::mutex> lock(observersMutex);
   observers.erase(std::remove(observers.begin(), observers.end(), observer),
                   observers.end());
+}
+
+std::vector<WifiSTAObserver *> EspWifiSTA::lockedObservers() {
+  std::lock_guard<std::mutex> lock(observersMutex);
+  return observers;
+}
+
+WifiScanDto EspWifiSTA::snapshotStatus() {
+  std::lock_guard<std::mutex> lock(statusMutex);
+  return statusNetwork;
+}
+
+WifiScanDto EspWifiSTA::setErrorStatus() {
+  std::lock_guard<std::mutex> lock(statusMutex);
+  statusNetwork.status = WifiStatus::WIFI_ERROR;
+  return statusNetwork;
 }
 
 void EspWifiSTA::processScan() {
@@ -145,30 +164,50 @@ void EspWifiSTA::processScan() {
     return;
   }
 
-  int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING) {
-    return;
-  }
-  if (n == WIFI_SCAN_FAILED) {
+  // Blocking all-channel scan: guarantees a complete result list. The old
+  // async scan + poll flow could time out (6s in the Arduino core) and
+  // restart the scan mid-flight, which made the Wi-Fi driver report only
+  // the partial results of the overridden scan (one or two networks per
+  // event). This task exists precisely to block here.
+  const int n = WiFi.scanNetworks(false, true);
+  if (n < 0) {
+    Serial.printf("[Scan] failed (%d), retrying\n", n);
+    std::lock_guard<std::mutex> lock(scanMutex);
     WiFi.scanDelete();
-    if (scanning) {
-      WiFi.scanNetworks(true, true);
-    }
     return;
   }
+
   std::vector<WifiScanDto> networks;
-  for (int i = 0; i < n; i++) {
-    auto net = processScanItem(i);
-    if (net.ssid == statusNetwork.ssid) {
-      continue;
+  {
+    std::lock_guard<std::mutex> lock(scanMutex);
+    // stopScan() may have run while we were waiting for the scan.
+    if (!scanning) {
+      WiFi.scanDelete();
+      return;
     }
-    networks.push_back(net);
+
+    std::string connectedSsid;
+    {
+      std::lock_guard<std::mutex> statusLock(statusMutex);
+      connectedSsid = statusNetwork.ssid;
+    }
+
+    for (int i = 0; i < n; i++) {
+      auto net = processScanItem(i);
+      // Hide the network being connected/connected to, but keep hidden
+      // networks (empty ssid) in the list when nothing is being connected.
+      if (!connectedSsid.empty() && net.ssid == connectedSsid) {
+        continue;
+      }
+      networks.push_back(std::move(net));
+    }
+
+    WiFi.scanDelete();
   }
-  for (auto &o : observers) {
+
+  for (auto *o : lockedObservers()) {
     o->onScan(networks);
   }
-  WiFi.scanDelete();
-  WiFi.scanNetworks(true, true);
 }
 
 WifiScanDto EspWifiSTA::processScanItem(int i) {
@@ -182,25 +221,40 @@ WifiScanDto EspWifiSTA::processScanItem(int i) {
 
 void EspWifiSTA::onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
-  case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-    statusNetwork.status = WifiStatus::WIFI_CONNECTED;
-    for (auto &o : observers) {
-      o->onConnect(statusNetwork);
+  case ARDUINO_EVENT_WIFI_STA_GOT_IP: {
+    WifiScanDto status;
+    {
+      std::lock_guard<std::mutex> lock(statusMutex);
+      statusNetwork.status = WifiStatus::WIFI_CONNECTED;
+      statusNetwork.rssi = WiFi.RSSI();
+      status = statusNetwork;
+    }
+    for (auto *o : lockedObservers()) {
+      o->onConnect(status);
     }
     break;
-  case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-    if (statusNetwork.status == WifiStatus::WIFI_CONNECTING) {
-      break;
+  }
+  case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
+    WifiScanDto status;
+    {
+      std::lock_guard<std::mutex> lock(statusMutex);
+      if (statusNetwork.status == WifiStatus::WIFI_CONNECTING) {
+        // The connect() loop reports the failure itself.
+        break;
+      }
+      status = statusNetwork;
+      statusNetwork.status = WifiStatus::WIFI_NONE;
+      statusNetwork.ssid.clear();
+      statusNetwork.secure = false;
+      statusNetwork.rssi = 0;
     }
-    if (statusNetwork.status == WifiStatus::WIFI_CONNECTED) {
-      for (auto &o : observers) {
-        o->onDisconnect(statusNetwork);
+    if (status.status == WifiStatus::WIFI_CONNECTED) {
+      for (auto *o : lockedObservers()) {
+        o->onDisconnect(status);
       }
     }
-    statusNetwork.status = WifiStatus::WIFI_NONE;
-    statusNetwork.ssid.clear();
-    statusNetwork.secure = false;
     break;
+  }
   default:
     break;
   }

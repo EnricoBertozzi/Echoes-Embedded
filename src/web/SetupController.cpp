@@ -14,6 +14,9 @@ void SetupController::setup() {
   setupHandler->setMaxContentLength(2048);
   server.addHandler(setupHandler);
   server.addHandler(&events);
+  server.on("/wifi-list", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    this->handleScanList(request);
+  });
   server.onNotFound(
       [this](AsyncWebServerRequest *request) { this->handleFile(request); });
 }
@@ -23,6 +26,7 @@ void SetupController::start() {
     return;
   }
   server.begin();
+  running = true;
 }
 
 void SetupController::stop() {
@@ -30,14 +34,11 @@ void SetupController::stop() {
     return;
   }
   server.end();
+  running = false;
 }
 
 void SetupController::handleSetup(AsyncWebServerRequest *request,
                                   JsonVariant &json) {
-  if (request->method() != HTTP_POST) {
-    request->send(405, "text/plain", "Method not allowed");
-    return;
-  }
   JsonObject obj = json.as<JsonObject>();
   // Missing keys must become empty strings. A plain `String x = obj["key"]`
   // serializes a null JsonVariant to the literal "null", which would make
@@ -47,6 +48,12 @@ void SetupController::handleSetup(AsyncWebServerRequest *request,
   String ip = obj["ip"] | "";
   String gateway = obj["gateway"] | "";
   String subnet = obj["subnet"] | "";
+
+  if (ssid.isEmpty()) {
+    request->send(400, "text/plain", "Missing ssid");
+    return;
+  }
+
   WifiConnectDto dto{ssid.c_str(), password.c_str(), ip.c_str(),
                      gateway.c_str(), subnet.c_str()};
 
@@ -55,6 +62,17 @@ void SetupController::handleSetup(AsyncWebServerRequest *request,
   auto *response = request->beginResponse(200);
   response->addHeader("Cache-Control", "no-store");
   response->addHeader("Connection", "close");
+  request->send(response);
+}
+
+void SetupController::handleScanList(AsyncWebServerRequest *request) {
+  String json;
+  {
+    std::lock_guard<std::mutex> lock(scanMutex);
+    json = serializeScanList(lastScan);
+  }
+  auto *response = request->beginResponse(200, "application/json", json);
+  response->addHeader("Cache-Control", "no-store");
   request->send(response);
 }
 
@@ -71,11 +89,6 @@ void SetupController::handleFile(AsyncWebServerRequest *request) {
 
   AsyncWebServerResponse *response =
       request->beginResponse(LittleFS, path, contentType);
-
-  if (!response) {
-    request->send(404, "text/plain", "Not Found");
-    return;
-  }
 
   response->addHeader("Cache-Control", "no-store");
   response->addHeader("Connection", "close");
@@ -101,6 +114,22 @@ String SetupController::getContentType(String filename) {
   return "text/plain";
 }
 
+String SetupController::serializeScanList(
+    const std::vector<WifiScanDto> &scanList) const {
+  JsonDocument doc;
+  JsonArray array = doc.to<JsonArray>();
+  for (auto &network : scanList) {
+    JsonObject o = array.add<JsonObject>();
+    o["ssid"] = network.ssid;
+    o["secure"] = network.secure;
+    o["rssi"] = network.rssi;
+    o["status"] = static_cast<int>(network.status);
+  }
+  String json;
+  serializeJson(doc, json);
+  return json;
+}
+
 void SetupController::onConnect(const WifiScanDto &connectDto) {
   updateStatus(connectDto, WifiStatus::WIFI_CONNECTED);
 }
@@ -121,7 +150,7 @@ void SetupController::updateStatus(const WifiScanDto &connectDto,
                                    WifiStatus status) {
   JsonDocument doc;
   doc["ssid"] = connectDto.ssid;
-  doc["status"] = static_cast<int>(connectDto.status);
+  doc["status"] = static_cast<int>(status);
   doc["rssi"] = connectDto.rssi;
   doc["secure"] = connectDto.secure;
   String json;
@@ -130,16 +159,9 @@ void SetupController::updateStatus(const WifiScanDto &connectDto,
 }
 
 void SetupController::onScan(const std::vector<WifiScanDto> &scanList) {
-  JsonDocument doc;
-  JsonArray array = doc.to<JsonArray>();
-  for (auto &network : scanList) {
-    JsonObject o = array.add<JsonObject>();
-    o["ssid"] = network.ssid;
-    o["secure"] = network.secure;
-    o["rssi"] = network.rssi;
-    o["status"] = static_cast<int>(network.status);
+  {
+    std::lock_guard<std::mutex> lock(scanMutex);
+    lastScan = scanList;
   }
-  String json;
-  serializeJson(doc, json);
-  events.send(json, "list");
+  events.send(serializeScanList(scanList), "list");
 }

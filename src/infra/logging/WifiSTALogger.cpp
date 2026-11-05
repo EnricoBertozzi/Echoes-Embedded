@@ -17,3 +17,7 @@ void WifiSTALogger::onError(const WifiScanDto &connectDto) {
 void WifiSTALogger::onDisconnect(const WifiScanDto &connectDto) {
   Serial.printf("[WifiSTA] Disconnected from %s\n", connectDto.ssid.c_str());
 }
+
+void WifiSTALogger::onScan(const std::vector<WifiScanDto> &scanList) {
+  Serial.printf("[WifiSTA] scan: %d networks\n", (int)scanList.size());
+}

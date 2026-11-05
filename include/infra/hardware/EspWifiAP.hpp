@@ -5,6 +5,7 @@
 #include <WiFiAP.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <mutex>
 #include <vector>
 
 #include "application/hardware/WifiAP.hpp"
@@ -24,6 +25,7 @@ private:
 
   bool running{false};
   std::vector<WifiAPObserver *> observers;
+  std::mutex observersMutex;
   DNSServer dns;
   const byte DNS_PORT{53};
   uint16_t countConnect{0};
@@ -31,6 +33,8 @@ private:
   IPAddress apIP{192, 168, 4, 1};
   IPAddress gateway{192, 168, 4, 1};
   IPAddress subnet{255, 255, 255, 0};
+
+  std::vector<WifiAPObserver *> lockedObservers();
 
   void onWifiEvent(WiFiEvent_t event);
 };

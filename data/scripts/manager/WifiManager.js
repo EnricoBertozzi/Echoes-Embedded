@@ -13,7 +13,9 @@ export class WifiManager {
   }
 
   setup() {
-    this.#fetchWifi();
+    // First load only: fetch the last scan list so the page renders right
+    // away, before the first SSE event arrives. Updates come via SSE.
+    this.#fetchWifiList();
     this.#evt.addEventListener('status', e => this.#fetchStatus(e));
     this.#evt.addEventListener('list', e => this.#fetchWifi(e));
   }
@@ -23,10 +25,19 @@ export class WifiManager {
     this.#notify('fetch');
   }
 
+  async #fetchWifiList() {
+    try {
+      const response = await fetch('/wifi-list');
+      if (!response.ok)
+        return;
+      this.setWifis(await response.json());
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   async #fetchWifi(evt) {
     const data = JSON.parse(evt.data);
-    if (data.length === 0)
-      return;
     this.wifis = data;
     this.#notify('fetch');
   }
@@ -36,10 +47,27 @@ export class WifiManager {
     if (!data.ssid)
       return;
 
+    if (data.status === 0) {
+      // Disconnected: drop the status card, the network returns to the list.
+      if (this.status && this.status.ssid === data.ssid)
+        this.status = null;
+      this.#notify('update');
+      return;
+    }
+
     const networkIndex = this.wifis.findIndex(w => w.ssid === data.ssid);
-    if (networkIndex !== -1)
+    let wifi = data;
+    if (networkIndex !== -1) {
+      const known = this.wifis[networkIndex];
+      // Keep signal/lock info from the scan while there is no real value.
+      wifi = {
+        ...data,
+        rssi: data.rssi || known.rssi,
+        secure: data.secure || known.secure,
+      };
       this.wifis.splice(networkIndex, 1);
-    this.status = data;
+    }
+    this.status = wifi;
     this.#notify('update');
   }
 
@@ -67,8 +95,11 @@ export class WifiManager {
   }
 
   #markStatus(wifiDto, status) {
-    if (this.status && this.status !== wifiDto.ssid) {
-      this.wifis.splice(0, 1);
+    if (this.status && this.status.ssid !== wifiDto.ssid) {
+      // The previous status card goes back to the list.
+      const previous = { ...this.status, status: 0 };
+      if (!this.wifis.some(w => w.ssid === previous.ssid))
+        this.wifis.unshift(previous);
       this.status = null;
     }
     const i = this.wifis.findIndex(w => w.ssid === wifiDto.ssid);
@@ -81,9 +112,9 @@ export class WifiManager {
     const wifi = {
       ssid: wifiDto.ssid,
       status: status,
-      secure: wifiDto.pass !== '',
-      rssi: wifiDto.rssi,
-    }
+      secure: wifiDto.password !== '',
+      rssi: 0,
+    };
     this.status = wifi;
     this.#notify('update');
   }
@@ -98,8 +129,8 @@ export class WifiManager {
     if (!this.#listeners[event])
       return;
     const i = this.#listeners[event].findIndex(i => i === cb);
-    if (i >= 0);
-    this.#listeners[event].splice(i, 1);
+    if (i >= 0)
+      this.#listeners[event].splice(i, 1);
   }
 
   #notify(event) {

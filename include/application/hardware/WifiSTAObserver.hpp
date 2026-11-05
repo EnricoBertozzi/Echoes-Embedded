@@ -5,7 +5,7 @@
 
 class WifiSTAObserver {
 public:
-  ~WifiSTAObserver() = default;
+  virtual ~WifiSTAObserver() = default;
 
   virtual void onConnect(const WifiScanDto &connectDto) {}
   virtual void onConnecting(const WifiScanDto &connectDto) {}

@@ -74,9 +74,9 @@ export class WifiRender {
     const div = document.createElement('div');
     if (wifi.rssi >= -55)
       div.appendChild(this.#icons.wifiFull.cloneNode(true));
-    else if (wifi.rssi > -65 && wifi.rssi < -55)
+    else if (wifi.rssi >= -65)
       div.appendChild(this.#icons.wifi75.cloneNode(true));
-    else if (wifi.rssi > -75 && wifi.rssi < -65)
+    else if (wifi.rssi >= -75)
       div.appendChild(this.#icons.wifi50.cloneNode(true));
     else
       div.appendChild(this.#icons.wifi25.cloneNode(true));
@@ -140,6 +140,7 @@ export class WifiRender {
   }
 
   selectWifi(wifi) {
+    this.#wifiForm.clearError();
     this.#wifiModalSsid.type = 'hidden';
     this.#wifiModal.style.display = 'flex';
     this.#wifiModalName.textContent = wifi.ssid;
