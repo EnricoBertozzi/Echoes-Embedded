@@ -6,7 +6,7 @@ class FileStorage {
 public:
   virtual ~FileStorage() = default;
 
-  virtual bool save(char *filename, uint8_t *data, size_t size);
-  virtual bool exists(char *filename);
-  virtual bool remove(char *filename);
+  virtual bool save(char *filename, uint8_t *data, size_t size) = 0;
+  virtual bool exists(char *filename) = 0;
+  virtual bool remove(char *filename) = 0;
 };

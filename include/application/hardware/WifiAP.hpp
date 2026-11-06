@@ -8,6 +8,6 @@ public:
 
   virtual void start() = 0;
   virtual void stop() = 0;
-  virtual void registerObserver(WifiAPObserver *observer);
-  virtual void unregisterObserver(WifiAPObserver *observer);
+  virtual void registerObserver(WifiAPObserver *observer) = 0;
+  virtual void unregisterObserver(WifiAPObserver *observer) = 0;
 };
