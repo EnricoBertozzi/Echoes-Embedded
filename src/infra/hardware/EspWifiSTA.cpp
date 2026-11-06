@@ -1,6 +1,6 @@
 #include "infra/hardware/EspWifiSTA.hpp"
-#include <esp_wifi.h>
 #include <algorithm>
+#include <esp_wifi.h>
 #include <vector>
 
 EspWifiSTA::EspWifiSTA() {
@@ -86,8 +86,6 @@ void EspWifiSTA::connect(const std::string &ssid, const std::string &pass) {
     disconnect();
   }
 
-  WiFi.setAutoReconnect(false);
-  WiFi.persistent(false);
   WiFi.begin(ssid.c_str(), pass.c_str());
 
   int tries = 0;
