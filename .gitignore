@@ -2,6 +2,7 @@
 *.d
 include/Config.h
 .pio
+.env
 
 # Compiled Object files
 *.slo
