@@ -6,5 +6,5 @@ class Authenticator {
 public:
   virtual ~Authenticator() = default;
 
-  virtual std::string authenticate(std::string password) = 0;
+  virtual std::string issueToken() = 0;
 };

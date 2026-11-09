@@ -10,8 +10,12 @@ EspWifiSTA::EspWifiSTA() {
         while (true) {
           if (wifiSTA->scanning) {
             wifiSTA->processScan();
+            // Give the SoftAP its airtime back between scan cycles; a
+            // back-to-back scan starves the AP beacons and drops clients.
+            vTaskDelay(pdMS_TO_TICKS(3000));
+          } else {
+            vTaskDelay(pdMS_TO_TICKS(250));
           }
-          vTaskDelay(pdMS_TO_TICKS(250));
         }
       },
       "scan-task", 4096, this, 1, &scanTask);
@@ -167,9 +171,10 @@ void EspWifiSTA::processScan() {
   // restart the scan mid-flight, which made the Wi-Fi driver report only
   // the partial results of the overridden scan (one or two networks per
   // event). This task exists precisely to block here.
-  const int n = WiFi.scanNetworks(false, true);
+  // 120ms per channel keeps the off-channel bursts short so the SoftAP
+  // keeps its beacons flowing while a client is browsing the portal.
+  const int n = WiFi.scanNetworks(false, true, false, 120);
   if (n < 0) {
-    Serial.printf("[Scan] failed (%d), retrying\n", n);
     std::lock_guard<std::mutex> lock(scanMutex);
     WiFi.scanDelete();
     return;

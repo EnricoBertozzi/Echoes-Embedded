@@ -20,7 +20,7 @@ void ScanService::onConnect(const WifiScanDto & /*connectDto*/) {
 }
 
 void ScanService::onConnecting(const WifiScanDto & /*connectDto*/) {
-  // Nothing to do: the connect flow stops the scan by itself.
+  // EspWifiSTA::connect() already stops the scan itself.
 }
 
 void ScanService::onError(const WifiScanDto & /*connectDto*/) {
@@ -34,10 +34,35 @@ void ScanService::onDisconnect(const WifiScanDto & /*connectDto*/) {
 }
 
 void ScanService::onScan(const std::vector<WifiScanDto> & /*scanList*/) {
-  // Nothing to do: the scan list is consumed by the web controller.
+  // Consumed by the web controller.
 }
 
+void ScanService::onRegistering() {
+  // The TLS handshake needs the radio quiet; updateScan() re-applies the
+  // policy when the registration round ends.
+  wifiSTA.stopScan();
+}
+
+void ScanService::onRegistered(const std::string & /*status*/,
+                               const std::string & /*deviceId*/) {
+  updateScan();
+}
+
+void ScanService::onRejected(const std::string & /*message*/,
+                             bool /*preProvisioned*/) {
+  updateScan();
+}
+
+void ScanService::onRetryLater(const std::string & /*reason*/,
+                               bool /*keepingKey*/) {
+  updateScan();
+}
+
+void ScanService::onKeyGenerationFailed() { updateScan(); }
+
 void ScanService::updateScan() {
+  // A client on the setup AP probably wants to change networks, so keep
+  // the list fresh even with the STA connected.
   const bool shouldScan = !staConnected || apClients > 0;
   if (shouldScan) {
     wifiSTA.startScan();
