@@ -1,7 +1,9 @@
 # Prerequisites
 *.d
 include/Config.h
+data/private.pem
 .pio
+.env
 
 # Compiled Object files
 *.slo
