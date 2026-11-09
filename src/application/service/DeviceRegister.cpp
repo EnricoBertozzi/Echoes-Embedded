@@ -11,7 +11,7 @@
 #define MQTT_REGISTRATION_TOPIC "register"
 #endif
 #ifndef MQTT_ACK_TOPIC
-#define MQTT_ACK_TOPIC "register/ack/{mac}"
+#define MQTT_ACK_TOPIC "register/ack/{hardware_id}"
 #endif
 
 namespace {
@@ -33,10 +33,13 @@ std::string trimmed(std::string s) {
 
 std::string ackTopicFor(const std::string &mac) {
   std::string topic(MQTT_ACK_TOPIC);
-  const std::string placeholder = "{mac}";
-  const size_t pos = topic.find(placeholder);
-  if (pos != std::string::npos) {
-    topic.replace(pos, placeholder.size(), mac);
+  // {mac} is the legacy placeholder, still accepted for old .env files.
+  for (const char *placeholder : {"{hardware_id}", "{mac}"}) {
+    const std::string token(placeholder);
+    const size_t pos = topic.find(token);
+    if (pos != std::string::npos) {
+      topic.replace(pos, token.size(), mac);
+    }
   }
   return topic;
 }
@@ -170,7 +173,8 @@ void DeviceRegister::registerDevice() {
   }
 
   JsonDocument doc;
-  doc["mac"] = mac;
+  // The platform identifies the device by hardware_id (today, the MAC).
+  doc["hardware_id"] = mac;
   doc["public_key"] = publicKey;
   // base64url of the DER signature is accepted (section 2.4).
   doc["signature"] = JwtBuilder::base64Url(der);

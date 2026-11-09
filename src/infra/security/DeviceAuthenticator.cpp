@@ -21,8 +21,8 @@ std::string DeviceAuthenticator::issueToken() {
     return {};
   }
 
-  // The MAC is hexadecimal with colons, no JSON escaping needed.
-  const std::string payloadJson = "{\"iss\":\"echoes-device\",\"mac\":\"" +
+  // The hardware id (MAC) is hexadecimal with colons, no JSON escaping needed.
+  const std::string payloadJson = "{\"iss\":\"echoes-device\",\"hardware_id\":\"" +
                                   mac + "\",\"exp\":" +
                                   std::to_string(now + TOKEN_TTL_SECONDS) +
                                   "}";
