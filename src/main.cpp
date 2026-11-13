@@ -1,3 +1,4 @@
+#include "application/service/ConfigurationMode.hpp"
 #include "application/service/DeviceRegister.hpp"
 #include "application/service/ScanService.hpp"
 #include "infra/console/FileConsole.hpp"
@@ -41,6 +42,7 @@ extern "C" void app_main(void) {
   SetupController setupController{wifiSTA};
   WifiIndicator wifiIndicator;
   ScanService scanService{wifiSTA};
+  ConfigurationMode configurationMode{wifiAP, setupController};
 
   wifiSTA.setup();
   wifiAP.start();
@@ -52,7 +54,7 @@ extern "C" void app_main(void) {
   DeviceAuthenticator authenticator{deviceKeys, mac};
   SntpClock sntpClock;
   DeviceRegister deviceRegister{deviceKeys, mqtt, authenticator,
-                                        sntpClock, mac};
+                                sntpClock, wifiSTA, configurationMode, mac};
   DeviceRegisterLogger deviceRegisterLogger;
   MqttLogger mqttLogger;
   FileConsole fileConsole{storage};
@@ -71,11 +73,13 @@ extern "C" void app_main(void) {
   wifiSTA.registerObserver(&scanService);
   wifiSTA.registerObserver(&deviceRegister);
   wifiAP.registerObserver(&apLogger);
-  wifiAP.registerObserver(&scanService);
-  wifiAP.registerObserver(&deviceRegister);
 
   setupController.setup();
   setupController.start();
+
+  configurationMode.registerObserver(&scanService);
+  configurationMode.registerObserver(&deviceRegister);
+  configurationMode.begin();
 
   scanService.begin();
 

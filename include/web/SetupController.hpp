@@ -3,17 +3,22 @@
 #include "application/hardware/WifiSTA.hpp"
 #include "application/hardware/WifiSTAObserver.hpp"
 #include "application/hardware/dto/WifiScanDto.hpp"
+#include "application/service/PortalActivity.hpp"
 #include <ESPAsyncWebServer.h>
+#include <atomic>
 #include <mutex>
 #include <vector>
 
-class SetupController : public WifiSTAObserver {
+class SetupController : public WifiSTAObserver, public PortalActivity {
 public:
   SetupController(WifiSTA &wifiSTA) : wifiSTA(wifiSTA) {}
   ~SetupController();
   void setup();
   void start();
   void stop();
+
+  // PortalActivity
+  uint32_t idleMs() const override;
 
   // WifiSTAObserver
   void onConnect(const WifiScanDto &connectDto) override;
@@ -34,6 +39,10 @@ private:
   std::mutex scanMutex;
   std::vector<WifiScanDto> lastScan;
 
+  // Written by the web server task, read by the registrar task.
+  std::atomic<uint32_t> lastRequestMs{0};
+
+  void touch();
   void handleSetup(AsyncWebServerRequest *request, JsonVariant &json);
   void handleScanList(AsyncWebServerRequest *request);
   void handleFile(AsyncWebServerRequest *request);

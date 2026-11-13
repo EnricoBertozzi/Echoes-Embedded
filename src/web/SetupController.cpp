@@ -37,8 +37,15 @@ void SetupController::stop() {
   running = false;
 }
 
+uint32_t SetupController::idleMs() const {
+  return millis() - lastRequestMs.load();
+}
+
+void SetupController::touch() { lastRequestMs.store(millis()); }
+
 void SetupController::handleSetup(AsyncWebServerRequest *request,
                                   JsonVariant &json) {
+  touch();
   JsonObject obj = json.as<JsonObject>();
   // Missing keys must become empty strings. A plain `String x = obj["key"]`
   // serializes a null JsonVariant to the literal "null", which would make
@@ -66,6 +73,7 @@ void SetupController::handleSetup(AsyncWebServerRequest *request,
 }
 
 void SetupController::handleScanList(AsyncWebServerRequest *request) {
+  touch();
   String json;
   {
     std::lock_guard<std::mutex> lock(scanMutex);
@@ -77,6 +85,7 @@ void SetupController::handleScanList(AsyncWebServerRequest *request) {
 }
 
 void SetupController::handleFile(AsyncWebServerRequest *request) {
+  touch();
   String path = request->url();
 
   if (path == "/")

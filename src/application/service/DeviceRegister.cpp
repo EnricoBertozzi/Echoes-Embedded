@@ -20,6 +20,9 @@ constexpr char CANONICAL_PREFIX[] = "echoes-device-registration-v1";
 // 2020-01-01: minimum sane clock, the JWT `exp` claim needs SNTP first.
 constexpr time_t MIN_VALID_TIME = 1577836800;
 
+// The task wakes on every state transition; no polling is needed.
+constexpr uint32_t WAKE_INTERVAL_MS = 30000;
+
 std::string trimmed(std::string s) {
   const auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
   while (!s.empty() && isSpace(static_cast<unsigned char>(s.front()))) {
@@ -48,8 +51,11 @@ std::string ackTopicFor(const std::string &mac) {
 
 DeviceRegister::DeviceRegister(DeviceKeys &keys, MqttClient &mqtt,
                                 Authenticator &auth, TimeSync &timeSync,
+                                WifiSTA &wifiSTA,
+                                ConfigurationMode &configurationMode,
                                 std::string mac)
     : keys(keys), mqtt(mqtt), auth(auth), timeSync(timeSync),
+      wifiSTA(wifiSTA), configurationMode(configurationMode),
       mac(std::move(mac)) {}
 
 DeviceRegister::~DeviceRegister() {
@@ -84,33 +90,18 @@ void DeviceRegister::unregisterObserver(DeviceRegisterObserver *observer) {
                   observers.end());
 }
 
-void DeviceRegister::onConnect(const WifiScanDto & /*connectDto*/) {
-  staConnected = true;
-  evaluateGate();
-}
+void DeviceRegister::onConnect(const WifiScanDto & /*connectDto*/) { wake(); }
 
 void DeviceRegister::onDisconnect(const WifiScanDto & /*connectDto*/) {
-  staConnected = false;
+  wake();
 }
 
-void DeviceRegister::onError(const WifiScanDto & /*connectDto*/) {
-  staConnected = false;
-}
+void DeviceRegister::onError(const WifiScanDto & /*connectDto*/) { wake(); }
 
-void DeviceRegister::onConnect() {
-  // Configuration mode: platform actions are deferred.
-  apClients++;
-}
+void DeviceRegister::onConfigurationModeChanged(bool /*active*/) { wake(); }
 
-void DeviceRegister::onDisconnect() {
-  if (apClients > 0) {
-    apClients--;
-  }
-  evaluateGate();
-}
-
-void DeviceRegister::evaluateGate() {
-  if (staConnected && apClients == 0 && task != nullptr) {
+void DeviceRegister::wake() {
+  if (task != nullptr) {
     xTaskNotifyGive(task);
   }
 }
@@ -120,11 +111,24 @@ void DeviceRegister::taskEntry(void *param) {
 }
 
 void DeviceRegister::run() {
-  while (true) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  bool ready = false;
 
-    // Out of configuration mode: the radio is quiet for the whole round —
-    // clock sync, TLS registration and the access token.
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAKE_INTERVAL_MS));
+
+    const bool nowReady =
+        wifiSTA.isConnected() && !configurationMode.isActive();
+    if (!nowReady) {
+      ready = false;
+      continue;
+    }
+    if (ready) {
+      continue;
+    }
+    ready = true;
+
+    // Radio quiet for the whole round: clock sync, TLS registration and the
+    // access token.
     for (auto *o : observers) {
       o->onRegistering();
     }

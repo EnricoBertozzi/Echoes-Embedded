@@ -1,10 +1,12 @@
 #pragma once
 
-#include "application/hardware/WifiAPObserver.hpp"
+#include "application/hardware/WifiSTA.hpp"
 #include "application/hardware/WifiSTAObserver.hpp"
 #include "application/security/DeviceKeys.hpp"
 #include "application/security/MqttClient.hpp"
 #include "application/service/Authenticator.hpp"
+#include "application/service/ConfigurationMode.hpp"
+#include "application/service/ConfigurationModeObserver.hpp"
 #include "application/service/DeviceRegisterObserver.hpp"
 #include "application/service/TimeSync.hpp"
 #include <atomic>
@@ -16,30 +18,30 @@
 #include <string>
 #include <vector>
 
-class DeviceRegister : public WifiSTAObserver, public WifiAPObserver {
+class DeviceRegister : public WifiSTAObserver,
+                       public ConfigurationModeObserver {
 public:
   DeviceRegister(DeviceKeys &keys, MqttClient &mqtt, Authenticator &auth,
-                 TimeSync &timeSync, std::string mac);
+                 TimeSync &timeSync, WifiSTA &wifiSTA,
+                 ConfigurationMode &configurationMode, std::string mac);
   ~DeviceRegister() override;
 
   void begin();
   void registerObserver(DeviceRegisterObserver *observer);
   void unregisterObserver(DeviceRegisterObserver *observer);
 
-  // WifiSTAObserver
+  // WifiSTAObserver / ConfigurationModeObserver: only transitions matter,
+  // the state itself comes from the ports.
   void onConnect(const WifiScanDto &connectDto) override;
   void onDisconnect(const WifiScanDto &connectDto) override;
   void onError(const WifiScanDto &connectDto) override;
-
-  // WifiAPObserver
-  void onConnect() override;
-  void onDisconnect() override;
+  void onConfigurationModeChanged(bool active) override;
 
 private:
   static void taskEntry(void *param);
   void run();
-  // Kicks the round when out of configuration mode.
-  void evaluateGate();
+  // Wakes the task so it re-evaluates the gate right away.
+  void wake();
   void registerDevice();
   void failRegistration();
   void retryLater(bool generated, const char *reason);
@@ -51,11 +53,9 @@ private:
   MqttClient &mqtt;
   Authenticator &auth;
   TimeSync &timeSync;
+  WifiSTA &wifiSTA;
+  ConfigurationMode &configurationMode;
   const std::string mac;
-
-  // Written only from the Wi-Fi event task, read by evaluateGate().
-  bool staConnected{false};
-  uint8_t apClients{0};
 
   std::vector<DeviceRegisterObserver *> observers;
   TaskHandle_t task{nullptr};
