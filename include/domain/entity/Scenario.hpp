@@ -1,5 +1,6 @@
 #pragma once
 
+#include "domain/entity/AuscultationPoint.hpp"
 #include <cstdint>
 #include <ctime>
 
@@ -9,6 +10,6 @@ using ScenarioAudio = char[32];
 struct Scenario {
   ScenarioId id;
   ScenarioAudio audio;
-  uint8_t pointId[16];
+  PointId pointId;
   time_t validUntil;
 };
