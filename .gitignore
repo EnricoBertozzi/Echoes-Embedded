@@ -2,6 +2,8 @@
 *.d
 include/Config.h
 .pio
+data/private.pem
+.env
 
 # Compiled Object files
 *.slo

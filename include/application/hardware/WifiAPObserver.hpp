@@ -2,7 +2,7 @@
 
 class WifiAPObserver {
 public:
-  ~WifiAPObserver() = default;
+  virtual ~WifiAPObserver() = default;
 
   virtual void onConnect() {}
   virtual void onDisconnect() {}

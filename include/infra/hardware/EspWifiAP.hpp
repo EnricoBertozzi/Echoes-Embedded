@@ -1,0 +1,51 @@
+#pragma once
+
+#include <DNSServer.h>
+#include <WiFi.h>
+#include <WiFiAP.h>
+#include <atomic>
+#include <cstddef>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <mutex>
+#include <vector>
+
+#include "application/hardware/WifiAP.hpp"
+#include "application/hardware/WifiAPObserver.hpp"
+
+class EspWifiAP : public WifiAP {
+public:
+  EspWifiAP();
+  ~EspWifiAP() override;
+  void start() override;
+  void stop() override;
+  std::size_t countConnect() override;
+  void registerObserver(WifiAPObserver *observer) override;
+  void unregisterObserver(WifiAPObserver *observer) override;
+
+private:
+  TaskHandle_t dnsLoop;
+
+  bool running{false};
+  std::vector<WifiAPObserver *> observers;
+  std::mutex observersMutex;
+  DNSServer dns;
+  const byte DNS_PORT{53};
+  // Last client count announced to the observers. The driver station table
+  // is the source of truth: ARDUINO_EVENT_WIFI_AP_STADISCONNECTED is not
+  // always delivered (e.g. around a channel switch), so an event-only
+  // counter can stay stuck forever.
+  std::atomic<uint16_t> announcedClients{0};
+  std::mutex clientsMutex;
+  uint32_t lastReconcile{0};
+
+  IPAddress apIP{192, 168, 4, 1};
+  IPAddress gateway{192, 168, 4, 1};
+  IPAddress subnet{255, 255, 255, 0};
+
+  std::vector<WifiAPObserver *> lockedObservers();
+
+  void onWifiEvent(WiFiEvent_t event);
+  void reconcileClients();
+  void syncClients();
+};

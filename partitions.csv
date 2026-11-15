@@ -1,0 +1,9 @@
+# Custom partition layout — 2MB firmware space
+
+# Name,   Type, SubType,  Offset,     Size,      Flags
+otadata,  data, ota,      ,           0x2000,
+app0,     app,  ota_0,    0x10000,    2048K,
+nvs,      data, nvs,      ,           52K,
+eeprom,   data, 0x99,     ,           4K,
+spiffs,   data, spiffs,   ,           300K,
+coredump, data, coredump, ,           64K

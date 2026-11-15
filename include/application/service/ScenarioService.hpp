@@ -8,6 +8,6 @@ class ScenarioService {
 public:
   virtual ~ScenarioService() = default;
 
-  virtual std::vector<Scenario> fetchAll();
-  virtual std::vector<AudioDto> fetchAudio(ScenarioId scenarioId);
+  virtual std::vector<Scenario> fetchAll() = 0;
+  virtual std::vector<AudioDto> fetchAudio(ScenarioId scenarioId) = 0;
 };
