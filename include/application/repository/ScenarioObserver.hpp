@@ -5,7 +5,8 @@ class ScenarioObserver {
 public:
   ~ScenarioObserver() = default;
 
-  void onSave(const Scenario &scenario);
-  void onUpdate(const Scenario &oldScenario, const Scenario &newScenario);
-  void onRemove(const Scenario &scenario);
+  virtual void onSave(const Scenario &scenario);
+  virtual void onUpdate(const Scenario &oldScenario,
+                        const Scenario &newScenario);
+  virtual void onRemove(const Scenario &scenario);
 };

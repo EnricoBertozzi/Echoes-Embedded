@@ -19,7 +19,7 @@ public:
 private:
   std::vector<OnPressFn> onPressFns;
   std::vector<OnReleaseFn> onReleaseFns;
-  TaskHandle_t task;
+  TaskHandle_t task{nullptr};
   const int adcPin;
   bool ready{true};
 

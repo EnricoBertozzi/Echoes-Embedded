@@ -24,7 +24,7 @@ public:
   void unregisterObserver(WifiAPObserver *observer) override;
 
 private:
-  TaskHandle_t dnsLoop;
+  TaskHandle_t dnsLoop{nullptr};
 
   bool running{false};
   std::vector<WifiAPObserver *> observers;

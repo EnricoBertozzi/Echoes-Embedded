@@ -16,7 +16,7 @@ EspPressSensor::EspPressSensor(int adcPin) : adcPin(adcPin) {
       taskName.c_str(), 4096, this, 1, &task);
 }
 
-EspPressSensor::~EspPressSensor() { vTaskDelete(&task); }
+EspPressSensor::~EspPressSensor() { vTaskDelete(task); }
 
 void EspPressSensor::processPress() {
   while (true) {
