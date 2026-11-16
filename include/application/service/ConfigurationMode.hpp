@@ -22,6 +22,9 @@ public:
 
   void begin();
   bool isActive() const { return active.load(); }
+  // True while at least one client is associated with the setup AP,
+  // independently of whether the portal is still being used.
+  bool hasApClients() const { return wifiAP.countConnect() > 0; }
   void registerObserver(ConfigurationModeObserver *observer);
   void unregisterObserver(ConfigurationModeObserver *observer);
 

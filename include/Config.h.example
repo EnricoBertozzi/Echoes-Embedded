@@ -2,6 +2,9 @@
 
 #define SCENARIOS_LIMIT 100
 
+// MQTT: intervalo entre registro/reconexão
+#define MQTT_RECONNECT_INTERVAL_MS 30000
+
 // FSR
 #define FSR_1 32
 #define FSR_2 33

@@ -38,11 +38,13 @@ public:
   void onConfigurationModeChanged(bool active) override;
 
 private:
+  enum class RegisterResult { Registered, Retry, Rejected };
+
   static void taskEntry(void *param);
   void run();
   // Wakes the task so it re-evaluates the gate right away.
   void wake();
-  void registerDevice();
+  RegisterResult registerDevice();
   void failRegistration();
   void retryLater(bool generated, const char *reason);
   bool waitForAck(std::string &out, uint32_t timeoutMs);
@@ -64,4 +66,6 @@ private:
   std::string ackPayload;
   std::atomic<bool> waiting{false};
   bool tokenLogged{false};
+  // True while the key in RAM was generated here and has not been stored yet.
+  bool keyGenerated{false};
 };

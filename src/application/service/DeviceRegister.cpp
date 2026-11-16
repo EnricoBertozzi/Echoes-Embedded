@@ -1,9 +1,14 @@
 #include "application/service/DeviceRegister.hpp"
+#include "Config.h"
 #include "application/security/JwtBuilder.hpp"
 #include <ArduinoJson.h>
 #include <cctype>
 #include <algorithm>
 #include <time.h>
+
+#ifndef MQTT_RECONNECT_INTERVAL_MS
+#define MQTT_RECONNECT_INTERVAL_MS 30000
+#endif
 
 // Injected by extra/getenv.py from .env / system environment; the fallbacks
 // follow the platform defaults (device-api.md section 2.1).
@@ -114,10 +119,17 @@ void DeviceRegister::run() {
   bool ready = false;
 
   while (true) {
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAKE_INTERVAL_MS));
+    // A failed round retries at the configured MQTT interval. After a
+    // successful round the task only needs to re-evaluate the gate.
+    const uint32_t waitMs =
+        ready ? WAKE_INTERVAL_MS : MQTT_RECONNECT_INTERVAL_MS;
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
 
-    const bool nowReady =
-        wifiSTA.isConnected() && !configurationMode.isActive();
+    // Never use the radio for MQTT while the setup AP is in use, and never
+    // register before the STA link is up.
+    const bool nowReady = wifiSTA.isConnected() &&
+                          !configurationMode.isActive() &&
+                          !configurationMode.hasApClients();
     if (!nowReady) {
       ready = false;
       continue;
@@ -125,7 +137,6 @@ void DeviceRegister::run() {
     if (ready) {
       continue;
     }
-    ready = true;
 
     // Radio quiet for the whole round: clock sync, TLS registration and the
     // access token.
@@ -133,30 +144,50 @@ void DeviceRegister::run() {
       o->onRegistering();
     }
     timeSync.sync();
-    registerDevice();
+    const RegisterResult result = registerDevice();
 
-    if (keys.isLoaded()) {
-      logAccessToken();
+    if (result == RegisterResult::Registered) {
+      ready = true;
+      if (keys.isLoaded()) {
+        logAccessToken();
+      }
+    } else if (result == RegisterResult::Rejected) {
+      // The platform answered and refused the key. Retrying the same round
+      // would only spam it; a Wi-Fi/AP transition allows a new attempt.
+      ready = true;
+    } else {
+      // Transient failure (broker/TLS/timeout): keep the gate open and try
+      // again on the next period.
+      ready = false;
     }
   }
 }
 
-void DeviceRegister::registerDevice() {
+DeviceRegister::RegisterResult DeviceRegister::registerDevice() {
   // Prefer the pre-provisioned/stored key; generate one only when absent.
-  const bool generated = !keys.load();
-  if (generated) {
-    for (auto *o : observers) {
-      o->onGeneratingKey(mac);
-    }
-    if (!keys.create()) {
+  // A generated key is kept in RAM across transient retries: if the broker
+  // received the registration but the ack was lost, generating a new key
+  // would conflict with the public key already stored for this MAC.
+  bool generated = keyGenerated;
+  if (!keys.isLoaded()) {
+    if (keys.load()) {
+      keyGenerated = false;
+      generated = false;
       for (auto *o : observers) {
-        o->onKeyGenerationFailed();
+        o->onKeyLoaded();
       }
-      return;
-    }
-  } else {
-    for (auto *o : observers) {
-      o->onKeyLoaded();
+    } else {
+      generated = true;
+      for (auto *o : observers) {
+        o->onGeneratingKey(mac);
+      }
+      if (!keys.create()) {
+        for (auto *o : observers) {
+          o->onKeyGenerationFailed();
+        }
+        return RegisterResult::Retry;
+      }
+      keyGenerated = true;
     }
   }
 
@@ -164,7 +195,7 @@ void DeviceRegister::registerDevice() {
 
   if (!mqtt.connect(20000)) {
     retryLater(generated, "MQTT broker unreachable");
-    return;
+    return RegisterResult::Retry;
   }
 
   // Canonical message signed by the device (device-api.md section 2.3).
@@ -173,7 +204,7 @@ void DeviceRegister::registerDevice() {
   std::string der;
   if (!keys.sign(message, der)) {
     retryLater(generated, "failed to sign the registration message");
-    return;
+    return RegisterResult::Retry;
   }
 
   JsonDocument doc;
@@ -195,19 +226,19 @@ void DeviceRegister::registerDevice() {
   if (!mqtt.subscribe(ackTopicFor(mac)) ||
       !mqtt.publish(MQTT_REGISTRATION_TOPIC, payload)) {
     retryLater(generated, "MQTT subscribe/publish failed");
-    return;
+    return RegisterResult::Retry;
   }
 
   std::string ack;
   if (!waitForAck(ack, 15000)) {
     retryLater(generated, "no registration ack (is the platform online?)");
-    return;
+    return RegisterResult::Retry;
   }
 
   JsonDocument ackDoc;
   if (deserializeJson(ackDoc, ack) != DeserializationError::Ok) {
     retryLater(generated, "malformed registration ack");
-    return;
+    return RegisterResult::Retry;
   }
 
   const std::string status = ackDoc["status"] | "";
@@ -221,6 +252,7 @@ void DeviceRegister::registerDevice() {
         o->onKeySaveFailed();
       }
     } else if (generated) {
+      keyGenerated = false;
       for (auto *o : observers) {
         o->onKeySaved();
       }
@@ -229,7 +261,7 @@ void DeviceRegister::registerDevice() {
       o->onRegistered(status, deviceId);
     }
     mqtt.disconnect();
-    return;
+    return RegisterResult::Registered;
   }
 
   for (auto *o : observers) {
@@ -238,25 +270,23 @@ void DeviceRegister::registerDevice() {
   // A generated key was never stored; a pre-provisioned one stays on flash
   // (only the in-memory copy is dropped, it is reloaded on the next wake).
   failRegistration();
+  return RegisterResult::Rejected;
 }
 
 void DeviceRegister::failRegistration() {
   mqtt.disconnect();
   keys.reset();
+  keyGenerated = false;
 }
 
 void DeviceRegister::retryLater(bool generated, const char *reason) {
   for (auto *o : observers) {
     o->onRetryLater(reason, !generated);
   }
-  if (generated) {
-    // Nothing was confirmed and nothing was stored: discard and retry.
-    failRegistration();
-  } else {
-    // The pre-provisioned key is presumably already known by the platform;
-    // keep it usable and let a later connection confirm.
-    mqtt.disconnect();
-  }
+  // Keep a generated key in RAM across transient failures: the broker may
+  // have stored it even if the ack was lost. It is persisted only after a
+  // confirmed registration. A pre-provisioned key remains on flash.
+  mqtt.disconnect();
 }
 
 bool DeviceRegister::waitForAck(std::string &out, uint32_t timeoutMs) {
