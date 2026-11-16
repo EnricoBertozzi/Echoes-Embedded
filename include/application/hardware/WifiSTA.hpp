@@ -13,6 +13,10 @@ public:
   virtual bool isScanning() = 0;
   virtual void startScan() = 0;
   virtual void stopScan() = 0;
+  // Stops scanning from the calling task. Implementations that serialize
+  // Wi-Fi commands must bypass their queue: callers use this when the radio
+  // has to be quiet before a blocking TLS handshake.
+  virtual void stopScanNow() { stopScan(); }
   virtual void registerObserver(WifiSTAObserver *observer) = 0;
   virtual void unregisterObserver(WifiSTAObserver *observer) = 0;
 };

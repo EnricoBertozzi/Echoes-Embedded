@@ -25,8 +25,9 @@ void ScanService::onConfigurationModeChanged(bool active) {
 
 void ScanService::onRegistering() {
   // The TLS handshake needs the radio quiet; updateScan() re-applies the
-  // policy when the registration round ends.
-  wifiSTA.stopScan();
+  // policy when the registration round ends. This must be synchronous:
+  // enqueueing the stop lets the scan keep running during registration.
+  wifiSTA.stopScanNow();
 }
 
 void ScanService::onRegistered(const std::string & /*status*/,

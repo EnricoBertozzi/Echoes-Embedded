@@ -43,6 +43,12 @@ void WifiSTAProxy::startScan() { enqueue(CommandType::StartScan); }
 
 void WifiSTAProxy::stopScan() { enqueue(CommandType::StopScan); }
 
+void WifiSTAProxy::stopScanNow() {
+  // Bypass the queue: the caller cannot wait for a possibly long command
+  // (connect blocks for up to 10s) before the radio goes quiet.
+  sta.stopScanNow();
+}
+
 void WifiSTAProxy::registerObserver(WifiSTAObserver *observer) {
   sta.registerObserver(observer);
 }

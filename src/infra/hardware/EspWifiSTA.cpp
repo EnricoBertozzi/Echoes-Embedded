@@ -66,8 +66,6 @@ void EspWifiSTA::connectDHCP(const WifiConnectDto &connectCmd) {
 
 void EspWifiSTA::connectStatic(const WifiConnectDto &connectCmd) {
   IPAddress ipParsed, gatewayParsed, subnetParsed;
-  IPAddress dns1(8, 8, 8, 8);
-  IPAddress dns2(8, 8, 4, 4);
 
   auto failParseIps = !ipParsed.fromString(connectCmd.ip.c_str()) ||
                       !gatewayParsed.fromString(connectCmd.gateway.c_str()) ||
@@ -81,7 +79,9 @@ void EspWifiSTA::connectStatic(const WifiConnectDto &connectCmd) {
     return;
   }
 
-  WiFi.config(ipParsed, gatewayParsed, subnetParsed, dns1, dns2);
+  // On a local network the gateway is normally the DNS forwarder. Hardcoding
+  // a public resolver breaks isolated labs and networks with local DNS.
+  WiFi.config(ipParsed, gatewayParsed, subnetParsed, gatewayParsed);
   connect(connectCmd.ssid, connectCmd.password);
 }
 

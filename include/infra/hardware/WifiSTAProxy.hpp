@@ -17,6 +17,7 @@ public:
   bool isScanning() override;
   void startScan() override;
   void stopScan() override;
+  void stopScanNow() override;
 
   void registerObserver(WifiSTAObserver *observer) override;
   void unregisterObserver(WifiSTAObserver *observer) override;
