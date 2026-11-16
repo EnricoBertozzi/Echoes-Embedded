@@ -108,9 +108,13 @@ void SetupController::handleFile(AsyncWebServerRequest *request) {
   if (path == "/")
     path = "/index.html";
 
+  // Block protected files and folders from being served.
+  if (path == "/private.pem" || path.startsWith("/audio/")) {
+    path = "/index.html";
+  }
+
   // Only web assets are served. Anything else — captive portal probes and
-  // device files such as /private.pem — falls back to the app page, never
-  // to the filesystem.
+  // device files — falls back to the app page, never to the filesystem.
   const bool servable = path == "/index.html" || path == "/icon.svg" ||
                         path.startsWith("/styles/") ||
                         path.startsWith("/scripts/");
