@@ -5,7 +5,7 @@
 #include <WiFiClientSecure.h>
 
 namespace {
-constexpr size_t MAX_AUDIO_BYTES = 393216; // 384 KiB per contract
+constexpr size_t MAX_AUDIO_BYTES = 1048576; // 1024 KiB per contract
 } // namespace
 
 ScenarioSyncService::ScenarioSyncService(DeviceAuthenticator &authenticator,
@@ -78,9 +78,9 @@ void ScenarioSyncService::cleanupOrphanAudioFiles() {
   }
 }
 
-bool ScenarioSyncService::downloadAndStoreAudio(const String &audioUrlPath,
-                                                const String &scenarioId,
-                                                const String & /*audioRevision*/) {
+bool ScenarioSyncService::downloadAndStoreAudio(
+    const String &audioUrlPath, const String &scenarioId,
+    const String & /*audioRevision*/) {
   if (!ensureAudioDir()) {
     Serial.println("[ScenarioSync] cannot create /audio dir");
     return false;
@@ -247,11 +247,14 @@ bool ScenarioSyncService::sync() {
       }
       // Also check file exists even if revision not tracked
       if (LittleFS.exists(audioPath)) {
-        // If revision matches cached, skip; but we just reset, so check new assignment
+        // If revision matches cached, skip; but we just reset, so check new
+        // assignment
       }
       if (needDownload) {
-        if (!downloadAndStoreAudio(String(audioUri), scenarioId, String(audioRev))) {
-          Serial.printf("[ScenarioSync] failed to download audio for %s\n", sid);
+        if (!downloadAndStoreAudio(String(audioUri), scenarioId,
+                                   String(audioRev))) {
+          Serial.printf("[ScenarioSync] failed to download audio for %s\n",
+                        sid);
           continue; // skip this assignment (keeps previous? no, we reset)
         }
       }
@@ -266,7 +269,8 @@ bool ScenarioSyncService::sync() {
   return true;
 }
 
-void ScenarioSyncService::postEvent(const char *type, const String &scenarioIdOrNullJson) {
+void ScenarioSyncService::postEvent(const char *type,
+                                    const String &scenarioIdOrNullJson) {
   String token = String(authenticator.issueToken().c_str());
   if (token.length() == 0)
     return;
@@ -282,7 +286,8 @@ void ScenarioSyncService::postEvent(const char *type, const String &scenarioIdOr
   if (scenarioIdOrNullJson == "null") {
     body = String("{\"type\":\"") + type + "\",\"scenarioId\":null}";
   } else {
-    body = String("{\"type\":\"") + type + "\",\"scenarioId\":\"" + scenarioIdOrNullJson + "\"}";
+    body = String("{\"type\":\"") + type + "\",\"scenarioId\":\"" +
+           scenarioIdOrNullJson + "\"}";
   }
   int code = http.POST((uint8_t *)body.c_str(), body.length());
   if (code != 202) {
