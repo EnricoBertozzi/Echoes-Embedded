@@ -67,7 +67,9 @@ void SetupController::handleSetup(AsyncWebServerRequest *request,
   WifiConnectDto dto{ssid.c_str(), password.c_str(), ip.c_str(),
                      gateway.c_str(), subnet.c_str()};
 
-  wifiSTA.connect(dto);
+  // WifiService remembers the credentials and only persists them after the
+  // STA obtains an IP, so a failed attempt never overwrites a working setup.
+  wifiService.connect(dto);
 
   auto *response = request->beginResponse(200);
   response->addHeader("Cache-Control", "no-store");

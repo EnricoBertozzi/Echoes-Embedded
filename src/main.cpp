@@ -2,6 +2,7 @@
 #include "application/service/ConfigurationMode.hpp"
 #include "application/service/DeviceRegister.hpp"
 #include "application/service/ScanService.hpp"
+#include "application/service/WifiService.hpp"
 #include "domain/entity/Scenario.hpp"
 #include "infra/console/FileConsole.hpp"
 #include "infra/hardware/EspAudioPlayer.hpp"
@@ -18,6 +19,7 @@
 #include "infra/mqtt/EspMqttClient.hpp"
 #include "infra/security/DeviceAuthenticator.hpp"
 #include "infra/security/MbedtlsDeviceKeys.hpp"
+#include "infra/storage/EspWifiStorage.hpp"
 #include "infra/storage/LittleFsStorage.hpp"
 #include "infra/time/SntpClock.hpp"
 #include "web/SetupController.hpp"
@@ -42,9 +44,11 @@ extern "C" void app_main(void) {
   EspWifiAP wifiAP;
   EspWifiSTA espWifiSTA;
   WifiSTAProxy wifiSTA{espWifiSTA};
+  EspWifiStorage wifiStorage;
+  WifiService wifiService{wifiAP, wifiSTA, wifiStorage};
   WifiSTALogger staLogger;
   WifiAPLogger apLogger;
-  SetupController setupController{wifiSTA};
+  SetupController setupController{wifiService};
   WifiIndicator wifiIndicator;
   ScanService scanService{wifiSTA};
   ConfigurationMode configurationMode{wifiAP, setupController};
@@ -93,6 +97,10 @@ extern "C" void app_main(void) {
   deviceRegister.registerObserver(&deviceRegisterLogger);
   deviceRegister.registerObserver(&scanService);
   deviceRegister.begin();
+
+  // Loads the last saved credentials and starts the periodic reconnect task.
+  // On a successful setup this also persists the newly validated credentials.
+  wifiService.start();
 
   // Audio
   EspPressSensor pressSensor1{FSR_1};

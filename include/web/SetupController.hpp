@@ -1,9 +1,9 @@
 #pragma once
 
-#include "application/hardware/WifiSTA.hpp"
 #include "application/hardware/WifiSTAObserver.hpp"
 #include "application/hardware/dto/WifiScanDto.hpp"
 #include "application/service/PortalActivity.hpp"
+#include "application/service/WifiService.hpp"
 #include <ESPAsyncWebServer.h>
 #include <atomic>
 #include <mutex>
@@ -11,7 +11,8 @@
 
 class SetupController : public WifiSTAObserver, public PortalActivity {
 public:
-  SetupController(WifiSTA &wifiSTA) : wifiSTA(wifiSTA) {}
+  explicit SetupController(WifiService &wifiService)
+      : wifiService(wifiService) {}
   ~SetupController();
   void setup();
   void start();
@@ -32,7 +33,7 @@ private:
   AsyncWebServer server{80};
   AsyncEventSource events{"/events"};
   AsyncCallbackJsonWebHandler *setupHandler{nullptr};
-  WifiSTA &wifiSTA;
+  WifiService &wifiService;
 
   // Last scan list, served on GET /wifi-list so the page can render
   // something before the first SSE event arrives.

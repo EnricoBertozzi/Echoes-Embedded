@@ -3,11 +3,11 @@
 #include <string>
 
 struct WifiConnectDto {
-  const std::string ssid;
-  const std::string password;
-  const std::string ip;
-  const std::string gateway;
-  const std::string subnet;
+  std::string ssid;
+  std::string password;
+  std::string ip;
+  std::string gateway;
+  std::string subnet;
 
-  bool isDHCP() const { return ip == ""; }
+  bool isDHCP() const { return ip.empty(); }
 };

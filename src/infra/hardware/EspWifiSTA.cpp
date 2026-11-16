@@ -34,6 +34,11 @@ void EspWifiSTA::setup() {
     this->onWifiEvent(event, info);
   });
   WiFi.mode(WIFI_AP_STA);
+  // Credentials are persisted by EspWifiStorage in NVS and reconnects are
+  // driven by WifiService (periodic + scan availability). Do not let the
+  // Arduino core store its own copy or reconnect behind our back.
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
 }
 
 void EspWifiSTA::connect(const WifiConnectDto &connectDto) {
@@ -102,7 +107,7 @@ void EspWifiSTA::connect(const std::string &ssid, const std::string &pass) {
     tries++;
   }
   if (isConnected()) {
-    WiFi.setAutoReconnect(true);
+    WiFi.setAutoReconnect(false);
     vTaskDelay(pdMS_TO_TICKS(200));
   } else {
     const WifiScanDto status = setErrorStatus();
@@ -190,16 +195,21 @@ void EspWifiSTA::processScan() {
     }
 
     std::string connectedSsid;
+    bool hideConnectedSsid = false;
     {
       std::lock_guard<std::mutex> statusLock(statusMutex);
       connectedSsid = statusNetwork.ssid;
+      hideConnectedSsid = statusNetwork.status == WifiStatus::WIFI_CONNECTING ||
+                          statusNetwork.status == WifiStatus::WIFI_CONNECTED;
     }
 
     for (int i = 0; i < n; i++) {
       auto net = processScanItem(i);
-      // Hide the network being connected/connected to, but keep hidden
-      // networks (empty ssid) in the list when nothing is being connected.
-      if (!connectedSsid.empty() && net.ssid == connectedSsid) {
+      // Hide only the network currently being used. A network that just
+      // failed must stay visible so WifiService can retry it periodically.
+      // Hidden networks (empty ssid) remain in the list.
+      if (hideConnectedSsid && !connectedSsid.empty() &&
+          net.ssid == connectedSsid) {
         continue;
       }
       networks.push_back(std::move(net));
