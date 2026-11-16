@@ -1,4 +1,5 @@
 #include "Config.h"
+#include "application/repository/ScenarioRepository.hpp"
 #include "application/service/ConfigurationMode.hpp"
 #include "application/service/DeviceRegister.hpp"
 #include "application/service/ScanService.hpp"
@@ -19,6 +20,7 @@
 #include "infra/mqtt/EspMqttClient.hpp"
 #include "infra/security/DeviceAuthenticator.hpp"
 #include "infra/security/MbedtlsDeviceKeys.hpp"
+#include "infra/storage/EspScenarioStorage.hpp"
 #include "infra/storage/EspWifiStorage.hpp"
 #include "infra/storage/LittleFsStorage.hpp"
 #include "infra/time/SntpClock.hpp"
@@ -58,6 +60,8 @@ extern "C" void app_main(void) {
 
   const std::string mac = EspMacAddress::get();
   LittleFsStorage storage;
+  ScenarioRepository scenarioRepository;
+  EspScenarioStorage scenarioStorage{scenarioRepository};
   MbedtlsDeviceKeys deviceKeys{storage, "/private.pem"};
   EspMqttClient mqtt{MQTT_BROKER_URL, mac};
   DeviceAuthenticator authenticator{deviceKeys, mac};
@@ -75,6 +79,15 @@ extern "C" void app_main(void) {
       // Keep running: the AP and the setup API still work without the UI.
       Serial.println("LittleFS format failed! Web UI unavailable.");
     }
+  }
+
+  scenarioRepository.registerObserver(&scenarioStorage);
+  {
+    std::vector<Scenario> loadedScenarios;
+    scenarioStorage.loadAll(loadedScenarios);
+    scenarioRepository.loadAll(loadedScenarios);
+    Serial.printf("[ScenarioStorage] loaded %u scenarios\n",
+                  (unsigned)loadedScenarios.size());
   }
 
   wifiSTA.registerObserver(&staLogger);

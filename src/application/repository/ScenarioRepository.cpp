@@ -84,6 +84,12 @@ void ScenarioRepository::remove(const ScenarioId scenarioId) {
   }
 }
 
+void ScenarioRepository::loadAll(const std::vector<Scenario> &list) {
+  scenarios = list;
+}
+
+std::vector<Scenario> ScenarioRepository::all() const { return scenarios; }
+
 void ScenarioRepository::registerObserver(ScenarioObserver *scenarioObserver) {
   if (!scenarioObserver) {
     return;

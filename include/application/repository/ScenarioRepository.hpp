@@ -11,6 +11,8 @@ public:
   void save(const Scenario &scenario);
   void update(const Scenario &scenario);
   void remove(const ScenarioId scenarioid);
+  void loadAll(const std::vector<Scenario> &list);
+  std::vector<Scenario> all() const;
   void registerObserver(ScenarioObserver *scenarioObserver);
   void unregisterObserver(ScenarioObserver *scenarioObserver);
 
