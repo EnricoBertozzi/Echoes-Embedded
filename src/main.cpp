@@ -2,6 +2,7 @@
 #include "application/repository/ScenarioRepository.hpp"
 #include "application/service/ConfigurationMode.hpp"
 #include "application/service/DeviceRegister.hpp"
+#include "application/service/ScenarioSyncService.hpp"
 #include "application/service/ScanService.hpp"
 #include "application/service/WifiService.hpp"
 #include "domain/entity/Scenario.hpp"
@@ -29,7 +30,7 @@
 #include <LittleFS.h>
 #include <nvs_flash.h>
 
-extern "C" void app_main(void) {
+static void app_task(void *) {
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
       err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -39,7 +40,7 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(err);
 
   initArduino();
-  Serial.setRxBufferSize(1024); // room to paste a whole PEM over the console
+  Serial.setRxBufferSize(1024);
   Serial.begin(115200);
   analogReadResolution(12);
 
@@ -66,9 +67,9 @@ extern "C" void app_main(void) {
   EspMqttClient mqtt{MQTT_BROKER_URL, mac};
   DeviceAuthenticator authenticator{deviceKeys, mac};
   SntpClock sntpClock;
-  DeviceRegister deviceRegister{deviceKeys, mqtt,    authenticator,
-                                sntpClock,  wifiSTA, configurationMode,
-                                mac};
+  DeviceRegister deviceRegister{deviceKeys, mqtt, authenticator, sntpClock,
+                                wifiSTA, configurationMode, mac};
+  ScenarioSyncService scenarioSync{authenticator, API_BASE_URL, mac.c_str()};
   DeviceRegisterLogger deviceRegisterLogger;
   MqttLogger mqttLogger;
   FileConsole fileConsole{storage};
@@ -76,7 +77,6 @@ extern "C" void app_main(void) {
   if (!LittleFS.begin(false)) {
     Serial.println("LittleFS mount failed, formatting...");
     if (!LittleFS.begin(true)) {
-      // Keep running: the AP and the setup API still work without the UI.
       Serial.println("LittleFS format failed! Web UI unavailable.");
     }
   }
@@ -111,13 +111,12 @@ extern "C" void app_main(void) {
   deviceRegister.registerObserver(&scanService);
   deviceRegister.begin();
 
-  // Loads the last saved credentials and starts the periodic reconnect task.
-  // On a successful setup this also persists the newly validated credentials.
   wifiService.start();
 
-  // Audio
   EspPressSensor pressSensor1{FSR_1};
   EspPressSensor pressSensor2{FSR_2};
+  pressSensor1.setActiveChecker([&wifiAP]() { return wifiAP.countConnect() == 0; });
+  pressSensor2.setActiveChecker([&wifiAP]() { return wifiAP.countConnect() == 0; });
 
   EspAudioPlayer audio1{I2S_BCLK, I2S_LRC, I2S_DOUT, AMP_1};
   EspAudioPlayer audio2{AMP_2};
@@ -125,64 +124,112 @@ extern "C" void app_main(void) {
   struct AudioTaskContext {
     EspAudioPlayer *audio1;
     EspAudioPlayer *audio2;
+    EspWifiAP *ap;
   };
 
-  static AudioTaskContext audioContext{&audio1, &audio2};
+  static AudioTaskContext audioContext{&audio1, &audio2, &wifiAP};
 
   xTaskCreate(
       [](void *param) {
         auto *context = static_cast<AudioTaskContext *>(param);
-
         while (true) {
-          context->audio1->loop();
-          context->audio2->loop();
-
-          vTaskDelay(pdMS_TO_TICKS(1));
+          if (context->ap->countConnect() > 0) {
+            context->audio1->stop();
+            context->audio2->stop();
+            vTaskDelay(pdMS_TO_TICKS(100));
+          } else {
+            context->audio1->loop();
+            context->audio2->loop();
+            vTaskDelay(pdMS_TO_TICKS(1));
+          }
         }
       },
       "audio-loop", 8192, &audioContext, 2, nullptr);
 
-  Scenario scenario1{
-      {},
-      "/audio/traqueal.mp3",
-      {},
-      0,
+  struct SyncTaskCtx {
+    ScenarioSyncService *svc;
+    WifiSTAProxy *wifi;
   };
-
-  Scenario scenario2{
-      {},
-      "/audio/cardiaca.mp3",
-      {},
-      0,
-  };
+  static SyncTaskCtx syncCtx{&scenarioSync, &wifiSTA};
+  xTaskCreate(
+      [](void *param) {
+        auto *ctx = static_cast<SyncTaskCtx *>(param);
+        vTaskDelay(pdMS_TO_TICKS(15000));
+        while (true) {
+          if (ctx->wifi->isConnected()) {
+            Serial.println("[ScenarioSync] syncing...");
+            ctx->svc->sync();
+          }
+          vTaskDelay(pdMS_TO_TICKS(60000));
+        }
+      },
+      "scenario-sync", 12288, &syncCtx, 1, nullptr);
 
   pressSensor1.onPress([&]() {
     Serial.println("[FSR 1] PRESS");
-    if (audio1.play(scenario1)) {
-      Serial.println("Foi o audio 1");
+    if (wifiAP.countConnect() > 0) {
+      Serial.println("[FSR 1] ignored: AP client connected");
+      return;
+    }
+    auto assign = scenarioSync.getAssignment(1);
+    if (!assign.has || !LittleFS.exists(assign.audioPath)) {
+      Serial.println("[FSR 1] no assigned audio");
+      return;
+    }
+    Scenario tmp{};
+    strncpy(tmp.audio, assign.audioPath.c_str(), sizeof(tmp.audio) - 1);
+    tmp.audio[sizeof(tmp.audio) - 1] = '\0';
+    if (audio1.play(tmp)) {
+      Serial.println("[FSR 1] playing");
+      scenarioSync.postEvent("PLAY", assign.scenarioId);
     } else {
-      Serial.println("Falha ao tocar audio 1");
+      Serial.println("[FSR 1] failed to play");
     }
   });
   pressSensor1.onRelease([&]() {
     Serial.println("[FSR 1] RELEASE");
     audio1.stop();
+    auto assign = scenarioSync.getAssignment(1);
+    if (assign.has) {
+      scenarioSync.postEvent("STOP", assign.scenarioId);
+    }
   });
   pressSensor2.onPress([&]() {
     Serial.println("[FSR 2] PRESS");
-    if (audio2.play(scenario2)) {
-      Serial.println("Foi o audio 2");
+    if (wifiAP.countConnect() > 0) {
+      Serial.println("[FSR 2] ignored: AP client connected");
+      return;
+    }
+    auto assign = scenarioSync.getAssignment(2);
+    if (!assign.has || !LittleFS.exists(assign.audioPath)) {
+      Serial.println("[FSR 2] no assigned audio");
+      return;
+    }
+    Scenario tmp{};
+    strncpy(tmp.audio, assign.audioPath.c_str(), sizeof(tmp.audio) - 1);
+    tmp.audio[sizeof(tmp.audio) - 1] = '\0';
+    if (audio2.play(tmp)) {
+      Serial.println("[FSR 2] playing");
+      scenarioSync.postEvent("PLAY", assign.scenarioId);
     } else {
-      Serial.println("Falha ao tocar audio 2");
+      Serial.println("[FSR 2] failed to play");
     }
   });
   pressSensor2.onRelease([&]() {
     Serial.println("[FSR 2] RELEASE");
     audio2.stop();
+    auto assign = scenarioSync.getAssignment(2);
+    if (assign.has) {
+      scenarioSync.postEvent("STOP", assign.scenarioId);
+    }
   });
 
   while (true) {
     fileConsole.poll();
     delay(25);
   }
+}
+
+extern "C" void app_main(void) {
+  xTaskCreate(app_task, "app_task", 32768, nullptr, 5, nullptr);
 }

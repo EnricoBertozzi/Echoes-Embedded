@@ -20,6 +20,11 @@ EspPressSensor::~EspPressSensor() { vTaskDelete(task); }
 
 void EspPressSensor::processPress() {
   while (true) {
+    if (!activeChecker()) {
+      ready = true;
+      vTaskDelay(pdMS_TO_TICKS(200));
+      continue;
+    }
     int pressValue = analogRead(adcPin);
     if (pressValue < RELEASE_THRESHOLD && !ready) {
       ready = true;

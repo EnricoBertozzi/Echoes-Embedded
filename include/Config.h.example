@@ -8,6 +8,9 @@
 // Wi-Fi: intervalo entre tentativas de reconexão automática
 #define WIFI_RECONNECT_INTERVAL_MS 30000
 
+// Backend API (Echoes-Server)
+#define API_BASE_URL "http://192.168.1.50:8080"
+
 // FSR
 #define FSR_1 32
 #define FSR_2 33
