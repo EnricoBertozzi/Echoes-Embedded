@@ -1,3 +1,20 @@
 #pragma once
 
 #define SCENARIOS_LIMIT 100
+
+// FSR
+#define FSR_1 32
+#define FSR_2 33
+
+// MAX98357A - SD_MODE
+#define AMP_1 13
+#define AMP_2 14
+
+// I2S compartilhado
+#define I2S_BCLK 26
+#define I2S_LRC 25
+#define I2S_DOUT 22
+
+// Parâmetros FSRs
+#define PRESS_THRESHOLD 700
+#define RELEASE_THRESHOLD 350
