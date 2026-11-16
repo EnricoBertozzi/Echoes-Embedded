@@ -39,15 +39,22 @@ private:
   std::mutex scanMutex;
   std::vector<WifiScanDto> lastScan;
 
+  // Last connection status, served on GET /wifi-status so a page reload can
+  // restore the connected-network card before the next SSE event arrives.
+  std::mutex statusMutex;
+  WifiScanDto lastStatus;
+
   // Written by the web server task, read by the registrar task.
   std::atomic<uint32_t> lastRequestMs{0};
 
   void touch();
   void handleSetup(AsyncWebServerRequest *request, JsonVariant &json);
   void handleScanList(AsyncWebServerRequest *request);
+  void handleStatus(AsyncWebServerRequest *request);
   void handleFile(AsyncWebServerRequest *request);
   String getContentType(String filename);
   String serializeScanList(const std::vector<WifiScanDto> &scanList) const;
+  String serializeStatus(const WifiScanDto &status) const;
 
   // WifiSTAObserver
   void updateStatus(const WifiScanDto &connectDto, WifiStatus status);

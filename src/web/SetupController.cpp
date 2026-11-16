@@ -17,6 +17,9 @@ void SetupController::setup() {
   server.on("/wifi-list", HTTP_GET, [this](AsyncWebServerRequest *request) {
     this->handleScanList(request);
   });
+  server.on("/wifi-status", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    this->handleStatus(request);
+  });
   server.onNotFound(
       [this](AsyncWebServerRequest *request) { this->handleFile(request); });
 }
@@ -84,6 +87,18 @@ void SetupController::handleScanList(AsyncWebServerRequest *request) {
   request->send(response);
 }
 
+void SetupController::handleStatus(AsyncWebServerRequest *request) {
+  touch();
+  String json;
+  {
+    std::lock_guard<std::mutex> lock(statusMutex);
+    json = serializeStatus(lastStatus);
+  }
+  auto *response = request->beginResponse(200, "application/json", json);
+  response->addHeader("Cache-Control", "no-store");
+  request->send(response);
+}
+
 void SetupController::handleFile(AsyncWebServerRequest *request) {
   touch();
   String path = request->url();
@@ -145,6 +160,17 @@ String SetupController::serializeScanList(
   return json;
 }
 
+String SetupController::serializeStatus(const WifiScanDto &status) const {
+  JsonDocument doc;
+  doc["ssid"] = status.ssid;
+  doc["status"] = static_cast<int>(status.status);
+  doc["rssi"] = status.rssi;
+  doc["secure"] = status.secure;
+  String json;
+  serializeJson(doc, json);
+  return json;
+}
+
 void SetupController::onConnect(const WifiScanDto &connectDto) {
   updateStatus(connectDto, WifiStatus::WIFI_CONNECTED);
 }
@@ -163,13 +189,14 @@ void SetupController::onDisconnect(const WifiScanDto &connectDto) {
 
 void SetupController::updateStatus(const WifiScanDto &connectDto,
                                    WifiStatus status) {
-  JsonDocument doc;
-  doc["ssid"] = connectDto.ssid;
-  doc["status"] = static_cast<int>(status);
-  doc["rssi"] = connectDto.rssi;
-  doc["secure"] = connectDto.secure;
+  WifiScanDto snapshot = connectDto;
+  snapshot.status = status;
   String json;
-  serializeJson(doc, json);
+  {
+    std::lock_guard<std::mutex> lock(statusMutex);
+    lastStatus = snapshot;
+    json = serializeStatus(lastStatus);
+  }
   events.send(json, "status");
 }
 
