@@ -71,3 +71,17 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Saídas do concatena.sh
+combinado.txt
+combinado.*
+combinado_*
+combinado-*
+estrutura.txt
+estrutura_dirs.txt
+estrutura.json
+estrutura*.pdf
+estrutura*.png
+estrutura*.jpg
+estrutura*.zip
+estrutura*.xz

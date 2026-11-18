@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <functional>
@@ -7,8 +8,14 @@ using OnReleaseFn = std::function<void()>;
 
 class PressSensor {
 public:
-  virtual ~PressSensor() = default;
+    virtual ~PressSensor() = default;
 
-  virtual void onPress(OnPressFn onPressFn);
-  virtual void onRelease(OnReleaseFn onReleaseFn);
+    virtual void onPress(
+        OnPressFn onPressFn
+    ) = 0;
+
+    virtual void onRelease(
+        OnReleaseFn onReleaseFn
+    ) = 0;
 };
+

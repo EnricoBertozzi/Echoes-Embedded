@@ -15,7 +15,8 @@ public:
   bool play(const Scenario &scenario) override;
   bool stop() override;
 
-  void loop();
+  // Retorna true quando o decodificador parou (fim do MP3 ou falha).
+  bool loop();
 
 private:
   static bool audioBusy;
@@ -27,6 +28,7 @@ private:
 
   AudioFileSourceLittleFS *file{nullptr};
   AudioGeneratorMP3 *mp3{nullptr};
+  uint32_t startedAtMs{0};
 
   void stopInternal();
 };

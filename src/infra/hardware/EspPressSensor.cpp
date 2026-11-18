@@ -1,6 +1,7 @@
 #include "infra/hardware/EspPressSensor.hpp"
 #include "Config.h"
 #include <Arduino.h>
+#include <string>
 
 EspPressSensor::EspPressSensor(int adcPin) : adcPin(adcPin) {
   pinMode(adcPin, INPUT);

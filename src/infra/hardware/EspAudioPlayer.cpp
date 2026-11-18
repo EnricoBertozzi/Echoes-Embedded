@@ -19,7 +19,9 @@ EspAudioPlayer::EspAudioPlayer(int i2sBlck, int i2sLrc, int i2sDout, int sdMode)
   if (!output) {
     output = new AudioOutputI2S();
     output->SetPinout(i2sBlck, i2sLrc, i2sDout);
-    output->SetGain(0.7);
+    // Ganho digital maximo sem amplificacao acima da escala 1.0.
+    // O ganho fisico depende do MAX98357A, da alimentacao e do alto-falante.
+    output->SetGain(1.0);
   }
 }
 
@@ -60,29 +62,32 @@ bool EspAudioPlayer::play(const Scenario &scenario) {
 
   activePlayer = this;
   audioBusy = true;
+  startedAtMs = millis();
 
+  Serial.printf("[AUDIO] MP3 iniciado, AMP GPIO=%d, gain=1.0\n", sdMode);
   xSemaphoreGive(audioMutex);
   return true;
 }
 
-void EspAudioPlayer::loop() {
+bool EspAudioPlayer::loop() {
+  bool finished = false;
   xSemaphoreTake(audioMutex, portMAX_DELAY);
 
   if (activePlayer == this && mp3) {
     bool running = mp3->loop();
 
     if (!running) {
-      Serial.println("[AUDIO] Decoder terminou ou falhou!");
+      Serial.printf("[AUDIO] Decoder parou apos %lu ms (fim do arquivo ou erro)\n", static_cast<unsigned long>(millis() - startedAtMs));
       stopInternal();
+      finished = true;
     }
   }
 
   xSemaphoreGive(audioMutex);
+  return finished;
 }
 
 bool EspAudioPlayer::stop() {
-  Serial.println("[AUDIO] stop() solicitado");
-
   xSemaphoreTake(audioMutex, portMAX_DELAY);
 
   if (activePlayer == this) {

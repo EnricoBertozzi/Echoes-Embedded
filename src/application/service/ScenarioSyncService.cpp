@@ -1,297 +1,782 @@
+
 #include "application/service/ScenarioSyncService.hpp"
+
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
+#include <WiFi.h>
 #include <WiFiClient.h>
-#include <WiFiClientSecure.h>
+#include <mbedtls/sha256.h>
+
+#include <algorithm>
+#include <cerrno>
+#include <cctype>
+#include <string>
 
 namespace {
-constexpr size_t MAX_AUDIO_BYTES = 1048576; // 1024 KiB per contract
+
+constexpr size_t MAX_AUDIO_BYTES = 512 * 1024;
+constexpr uint32_t REQUEST_TIMEOUT_MS = 5000;
+constexpr uint32_t CHUNK_TIMEOUT_MS = 5000;
+
+constexpr char NVS_NAMESPACE[] = "echoes_sync";
+constexpr char NVS_KEY[] = "manifest";
+
+bool isUuid(const String &value) {
+    if (value.length() != 36) {
+        return false;
+    }
+
+    for (int i = 0; i < 36; ++i) {
+        const char c = value[i];
+
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != '-') {
+                return false;
+            }
+        } else if (!isxdigit(
+            static_cast<unsigned char>(c)
+        )) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// A nomeacao antiga usava 16+16 digitos hexadecimais e gerava
+// um arquivo temporario de 41 caracteres; a criacao falha na placa.
+// O hash abrange os UUIDs COMPLETOS do cenario e da revisao,
+// permitindo um nome curto e estavel sem ignorar versoes.
+// 14 hex (56 bits) + ".mp3.tmp" = 22 caracteres na pasta /audio.
+String cacheAudioPath(
+    const String &scenarioId,
+    const String &revision
+) {
+    const String identity = scenarioId + ":" + revision;
+    uint8_t digest[32] = {};
+
+    if (mbedtls_sha256(
+            reinterpret_cast<const unsigned char *>(identity.c_str()),
+            identity.length(),
+            digest,
+            0
+        ) != 0) {
+        Serial.println("[ScenarioSync] Cache hash failed");
+        return String();
+    }
+
+    constexpr char HEX_DIGITS[] = "0123456789abcdef";
+    char shortHash[15] = {};
+
+    for (int i = 0; i < 7; ++i) {
+        shortHash[i * 2] = HEX_DIGITS[digest[i] >> 4];
+        shortHash[i * 2 + 1] = HEX_DIGITS[digest[i] & 0x0f];
+    }
+
+    return String("/audio/") + shortHash + ".mp3";
+}
+
+bool same(
+    const SensorScenarioAssignment &a,
+    const SensorScenarioAssignment &b
+) {
+    return a.has == b.has &&
+           a.scenarioId == b.scenarioId &&
+           a.audioPath == b.audioPath &&
+           a.audioRevision == b.audioRevision;
+}
+
 } // namespace
 
-ScenarioSyncService::ScenarioSyncService(DeviceAuthenticator &authenticator,
-                                         const char *apiBaseUrl,
-                                         const char *hardwareId)
-    : authenticator(authenticator), apiBaseUrl(apiBaseUrl ? apiBaseUrl : ""),
-      hardwareId(hardwareId ? hardwareId : "") {}
+ScenarioSyncService::ScenarioSyncService(
+    DeviceAuthenticator &authenticator,
+    const char *apiBaseUrl,
+    const char *hardwareId
+)
+    : authenticator(authenticator),
+      apiBaseUrl(apiBaseUrl ? apiBaseUrl : ""),
+      hardwareId(hardwareId ? hardwareId : "") {
+
+    while (this->apiBaseUrl.endsWith("/")) {
+        this->apiBaseUrl.remove(
+            this->apiBaseUrl.length() - 1
+        );
+    }
+}
 
 SensorScenarioAssignment
-ScenarioSyncService::getAssignment(uint8_t sensorIndex1Based) const {
-  if (sensorIndex1Based >= 1 && sensorIndex1Based <= 2) {
+ScenarioSyncService::getAssignment(
+    uint8_t sensorIndex1Based
+) const {
+    if (sensorIndex1Based < 1 ||
+        sensorIndex1Based > 2) {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(
+        assignmentsMutex
+    );
+
     return assignments_[sensorIndex1Based - 1];
-  }
-  return {};
 }
 
 bool ScenarioSyncService::ensureAudioDir() {
-  if (!LittleFS.exists("/audio")) {
-    return LittleFS.mkdir("/audio");
-  }
-  return true;
+    if (!LittleFS.exists("/audio")) {
+        if (!LittleFS.mkdir("/audio")) {
+            Serial.println("[ScenarioSync] Could not create /audio");
+            return false;
+        }
+    }
+
+    File dir = LittleFS.open("/audio", "r");
+    const bool valid = dir && dir.isDirectory();
+    if (dir) {
+        dir.close();
+    }
+    if (!valid) {
+        Serial.println("[ScenarioSync] /audio is not a directory");
+    }
+    return valid;
 }
 
 size_t ScenarioSyncService::littleFsFreeBytes() const {
-  // totalBytes() and usedBytes() are available in ESP32 LittleFS
-  size_t total = LittleFS.totalBytes();
-  size_t used = LittleFS.usedBytes();
-  if (total <= used)
-    return 0;
-  return total - used;
+    const size_t total = LittleFS.totalBytes();
+    const size_t used = LittleFS.usedBytes();
+
+    return total > used ? total - used : 0;
 }
 
-void ScenarioSyncService::cleanupOrphanAudioFiles() {
-  // Collect used scenario ids
-  std::vector<String> used;
-  for (int i = 0; i < 2; i++) {
-    if (assignments_[i].has && assignments_[i].scenarioId.length() > 0) {
-      used.push_back(assignments_[i].scenarioId);
+bool ScenarioSyncService::loadPersistedAssignments() {
+    Preferences preferences;
+
+    if (!preferences.begin(NVS_NAMESPACE, true)) {
+        return false;
     }
-  }
-  File root = LittleFS.open("/audio");
-  if (!root || !root.isDirectory()) {
-    return;
-  }
-  File f = root.openNextFile();
-  while (f) {
-    String name = String(f.name());
-    // name may be "/audio/xxx.mp3" or "xxx.mp3" depending on impl
-    String base = name;
-    int slash = base.lastIndexOf('/');
-    if (slash >= 0)
-      base = base.substring(slash + 1);
-    bool keep = false;
-    for (const auto &id : used) {
-      String expected = id + ".mp3";
-      if (base == expected) {
-        keep = true;
-        break;
-      }
+
+    String payload = preferences.getString(
+        NVS_KEY, ""
+    );
+
+    preferences.end();
+
+    if (payload.isEmpty()) {
+        return false;
     }
-    f.close();
-    if (!keep) {
-      String fullPath = name;
-      if (!fullPath.startsWith("/audio/") && !fullPath.startsWith("/"))
-        fullPath = "/audio/" + name;
-      if (fullPath.startsWith("/audio/"))
-        LittleFS.remove(fullPath);
+
+    JsonDocument doc;
+
+    if (deserializeJson(doc, payload) !=
+        DeserializationError::Ok) {
+        return false;
     }
-    f = root.openNextFile();
-  }
+
+    JsonArray entries = doc["points"].as<JsonArray>();
+
+    if (entries.isNull() || entries.size() != 2) {
+        return false;
+    }
+
+    SensorScenarioAssignment restored[2];
+
+    for (int i = 0; i < 2; ++i) {
+        JsonObject item =
+            entries[i].as<JsonObject>();
+
+        if (item.isNull()) {
+            return false;
+        }
+
+        restored[i].has = item["has"] | false;
+
+        restored[i].scenarioId =
+            String(item["scenarioId"] | "");
+
+        restored[i].audioPath =
+            String(item["audioPath"] | "");
+
+        restored[i].audioRevision =
+            String(item["audioRevision"] | "");
+
+        if (restored[i].has) {
+            const bool valid =
+                isUuid(restored[i].scenarioId) &&
+                isUuid(restored[i].audioRevision) &&
+                restored[i].audioPath.startsWith(
+                    "/audio/"
+                ) &&
+                LittleFS.exists(restored[i].audioPath);
+
+            if (!valid) {
+                restored[i] =
+                    SensorScenarioAssignment{};
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(
+            assignmentsMutex
+        );
+
+        assignments_[0] = restored[0];
+        assignments_[1] = restored[1];
+    }
+
+    Serial.println(
+        "[ScenarioSync] Associations restored from NVS"
+    );
+
+    return true;
+}
+
+bool ScenarioSyncService::persistAssignments(
+    const SensorScenarioAssignment next[2]
+) {
+    JsonDocument doc;
+
+    JsonArray entries =
+        doc["points"].to<JsonArray>();
+
+    for (int i = 0; i < 2; ++i) {
+        JsonObject item =
+            entries.add<JsonObject>();
+
+        item["has"] = next[i].has;
+        item["scenarioId"] = next[i].scenarioId;
+        item["audioPath"] = next[i].audioPath;
+        item["audioRevision"] = next[i].audioRevision;
+    }
+
+    String payload;
+    serializeJson(doc, payload);
+
+    Preferences preferences;
+
+    if (!preferences.begin(NVS_NAMESPACE, false)) {
+        return false;
+    }
+
+    const bool ok =
+        preferences.putString(
+            NVS_KEY,
+            payload
+        ) == payload.length();
+
+    preferences.end();
+
+    return ok;
 }
 
 bool ScenarioSyncService::downloadAndStoreAudio(
-    const String &audioUrlPath, const String &scenarioId,
-    const String & /*audioRevision*/) {
-  if (!ensureAudioDir()) {
-    Serial.println("[ScenarioSync] cannot create /audio dir");
-    return false;
-  }
-  String url = apiBaseUrl + audioUrlPath;
-  String token = String(authenticator.issueToken().c_str());
-  if (token.length() == 0) {
-    Serial.println("[ScenarioSync] no token (clock not synced?)");
-    return false;
-  }
+    const String &audioUrlPath,
+    const String &scenarioId,
+    const String &audioRevision,
+    const String &destinationPath
+) {
+    (void)audioRevision;
 
-  HTTPClient http;
-  WiFiClient client;
-  bool httpOk = http.begin(client, url);
-  if (!httpOk) {
-    Serial.println("[ScenarioSync] http.begin failed");
-    return false;
-  }
-  http.addHeader("Authorization", "Bearer " + token);
-  http.addHeader("Accept", "audio/mpeg");
+    const String expectedPath =
+        "/api/v1/scenarios/" +
+        scenarioId +
+        "/audio";
 
-  int code = http.GET();
-  if (code != 200) {
-    Serial.printf("[ScenarioSync] audio GET %d\n", code);
-    http.end();
-    return false;
-  }
-  int len = http.getSize();
-  if (len <= 0) {
-    Serial.println("[ScenarioSync] audio size unknown or empty");
-    http.end();
-    return false;
-  }
-  if ((size_t)len > MAX_AUDIO_BYTES) {
-    Serial.println("[ScenarioSync] audio too large");
-    http.end();
-    return false;
-  }
-  if (littleFsFreeBytes() < (size_t)len + 4096) { // reserve some slack
-    Serial.println("[ScenarioSync] not enough LittleFS space");
-    http.end();
-    return false;
-  }
-
-  String finalPath = "/audio/" + scenarioId + ".mp3";
-  String tmpPath = finalPath + ".tmp";
-  File f = LittleFS.open(tmpPath, "w");
-  if (!f) {
-    Serial.println("[ScenarioSync] cannot open tmp file");
-    http.end();
-    return false;
-  }
-  WiFiClient *stream = http.getStreamPtr();
-  size_t written = 0;
-  uint8_t buf[512];
-  while (http.connected() && (len > 0 || len == -1)) {
-    size_t avail = stream->available();
-    if (avail) {
-      int toRead = (avail > sizeof(buf)) ? sizeof(buf) : avail;
-      int r = stream->readBytes(buf, toRead);
-      if (r > 0) {
-        f.write(buf, r);
-        written += r;
-        if (len > 0)
-          len -= r;
-        if (written > MAX_AUDIO_BYTES) {
-          break;
-        }
-      }
-    } else {
-      delay(1);
+    if (!isUuid(scenarioId) ||
+        audioUrlPath != expectedPath ||
+        !ensureAudioDir()) {
+        return false;
     }
-    if (written >= MAX_AUDIO_BYTES && len != 0)
-      break;
-  }
-  f.close();
-  http.end();
 
-  if (written == 0 || written > MAX_AUDIO_BYTES) {
-    LittleFS.remove(tmpPath);
-    Serial.println("[ScenarioSync] download failed/too large");
-    return false;
-  }
-  // Replace old
-  LittleFS.remove(finalPath);
-  if (!LittleFS.rename(tmpPath, finalPath)) {
-    LittleFS.remove(tmpPath);
-    Serial.println("[ScenarioSync] rename failed");
-    return false;
-  }
-  Serial.printf("[ScenarioSync] saved %s (%u bytes)\n", finalPath.c_str(),
-                (unsigned)written);
-  return true;
+    // Transporte HTTP para o ambiente local de demonstração.
+    if (!apiBaseUrl.startsWith("http://")) {
+        Serial.println(
+            "[ScenarioSync] Unsupported API transport"
+        );
+        return false;
+    }
+
+    String token = String(
+        authenticator.issueToken().c_str()
+    );
+
+    if (token.isEmpty()) {
+        Serial.println(
+            "[ScenarioSync] Cannot generate device JWT"
+        );
+        return false;
+    }
+
+    WiFiClient client;
+    HTTPClient http;
+
+    http.setTimeout(REQUEST_TIMEOUT_MS);
+
+    if (!http.begin(
+        client,
+        apiBaseUrl + audioUrlPath
+    )) {
+        return false;
+    }
+
+    http.addHeader(
+        "Authorization",
+        "Bearer " + token
+    );
+
+    http.addHeader(
+        "Accept",
+        "audio/mpeg"
+    );
+
+    const int status = http.GET();
+
+    if (status != 200) {
+        Serial.printf(
+            "[ScenarioSync] Audio GET failed: %d\n",
+            status
+        );
+        http.end();
+        return false;
+    }
+
+    const int contentLen = http.getSize();
+
+    if (contentLen <= 0 ||
+        static_cast<size_t>(contentLen) >
+            MAX_AUDIO_BYTES ||
+        littleFsFreeBytes() <
+            static_cast<size_t>(contentLen) + 8192) {
+
+        Serial.println(
+            "[ScenarioSync] Invalid audio size or insufficient storage"
+        );
+
+        http.end();
+        return false;
+    }
+
+    const String temporaryPath =
+        destinationPath + ".tmp";
+
+    LittleFS.remove(temporaryPath);
+
+    File file = LittleFS.open(
+        temporaryPath,
+        "w"
+    );
+
+    if (!file) {
+        const int openError = errno;
+        Serial.printf(
+            "[ScenarioSync] Temp file open failed: %s "
+            "(errno=%d, free=%u bytes)\n",
+            temporaryPath.c_str(),
+            openError,
+            static_cast<unsigned>(littleFsFreeBytes())
+        );
+        http.end();
+        return false;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+
+    int remaining = contentLen;
+    uint32_t lastProgress = millis();
+
+    uint8_t buffer[1024];
+    bool error = false;
+
+    while (remaining > 0) {
+        const int available = stream->available();
+
+        if (available > 0) {
+            const size_t toRead = std::min(
+                static_cast<size_t>(remaining),
+                std::min(
+                    static_cast<size_t>(available),
+                    sizeof(buffer)
+                )
+            );
+
+            const int bytesRead =
+                stream->readBytes(
+                    buffer,
+                    toRead
+                );
+
+            if (bytesRead <= 0 ||
+                file.write(
+                    buffer,
+                    static_cast<size_t>(bytesRead)
+                ) != static_cast<size_t>(bytesRead)) {
+
+                error = true;
+                break;
+            }
+
+            remaining -= bytesRead;
+            lastProgress = millis();
+
+        } else if (
+            millis() - lastProgress > CHUNK_TIMEOUT_MS
+        ) {
+            error = true;
+            break;
+
+        } else {
+            delay(2);
+        }
+    }
+
+    file.flush();
+    file.close();
+    http.end();
+
+    if (error || remaining != 0) {
+        LittleFS.remove(temporaryPath);
+
+        Serial.println(
+            "[ScenarioSync] Incomplete MP3; cached audio preserved"
+        );
+
+        return false;
+    }
+
+    // O nome inclui a revisão. Não substitui o arquivo
+    // que eventualmente esteja aberto pelo decoder.
+    if (!LittleFS.rename(
+        temporaryPath,
+        destinationPath
+    )) {
+        LittleFS.remove(temporaryPath);
+        return false;
+    }
+
+    Serial.printf(
+        "[ScenarioSync] MP3 saved: %s (%d bytes)\n",
+        destinationPath.c_str(),
+        contentLen
+    );
+
+    return true;
 }
 
 bool ScenarioSyncService::sync() {
-  String token = String(authenticator.issueToken().c_str());
-  if (token.length() == 0) {
-    Serial.println("[ScenarioSync] cannot issue token");
-    return false;
-  }
-  String url = apiBaseUrl + "/api/v1/devices/me/scenario";
-  HTTPClient http;
-  WiFiClient client;
-  bool okBegin = http.begin(client, url);
-  if (!okBegin) {
-    Serial.println("[ScenarioSync] manifest http.begin failed");
-    return false;
-  }
-  http.addHeader("Authorization", "Bearer " + token);
-  http.addHeader("Accept", "application/json");
-  int code = http.GET();
-  if (code == 401) {
-    Serial.println("[ScenarioSync] 401 unauthorized");
-    http.end();
-    return false;
-  }
-  if (code == 403) {
-    Serial.println("[ScenarioSync] 403 forbidden");
-    http.end();
-    return false;
-  }
-  if (code != 200) {
-    Serial.printf("[ScenarioSync] manifest GET %d\n", code);
-    http.end();
-    return false;
-  }
-  String payload = http.getString();
-  http.end();
-
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, payload);
-  if (err) {
-    Serial.printf("[ScenarioSync] JSON parse error: %s\n", err.c_str());
-    return false;
-  }
-  JsonArray points = doc["points"].as<JsonArray>();
-  // reset assignments
-  for (int i = 0; i < 2; i++)
-    assignments_[i] = SensorScenarioAssignment{};
-
-  if (!points.isNull()) {
-    for (JsonObject p : points) {
-      int sensorIndex = p["sensorIndex"] | 0;
-      if (sensorIndex != 1 && sensorIndex != 2)
-        continue;
-      JsonObject scenario = p["scenario"];
-      if (scenario.isNull())
-        continue;
-      const char *sid = scenario["id"] | "";
-      const char *audioUri = scenario["audioUri"] | "";
-      const char *audioRev = scenario["audioRevision"] | "";
-      if (strlen(sid) == 0 || strlen(audioUri) == 0)
-        continue;
-      String scenarioId(sid);
-      String audioPath = "/audio/" + scenarioId + ".mp3";
-      // Check if already cached with same revision
-      bool needDownload = true;
-      if (assignments_[sensorIndex - 1].has &&
-          assignments_[sensorIndex - 1].scenarioId == scenarioId &&
-          assignments_[sensorIndex - 1].audioRevision == String(audioRev) &&
-          LittleFS.exists(audioPath)) {
-        needDownload = false;
-      }
-      // Also check file exists even if revision not tracked
-      if (LittleFS.exists(audioPath)) {
-        // If revision matches cached, skip; but we just reset, so check new
-        // assignment
-      }
-      if (needDownload) {
-        if (!downloadAndStoreAudio(String(audioUri), scenarioId,
-                                   String(audioRev))) {
-          Serial.printf("[ScenarioSync] failed to download audio for %s\n",
-                        sid);
-          continue; // skip this assignment (keeps previous? no, we reset)
-        }
-      }
-      assignments_[sensorIndex - 1].has = true;
-      assignments_[sensorIndex - 1].scenarioId = scenarioId;
-      assignments_[sensorIndex - 1].audioPath = audioPath;
-      assignments_[sensorIndex - 1].audioRevision = String(audioRev);
+    if (WiFi.status() != WL_CONNECTED ||
+        !apiBaseUrl.startsWith("http://")) {
+        return false;
     }
-  }
-  cleanupOrphanAudioFiles();
-  postEvent("CONNECTION", String("null"));
-  return true;
+
+    String token = String(
+        authenticator.issueToken().c_str()
+    );
+
+    if (token.isEmpty()) {
+        return false;
+    }
+
+    WiFiClient client;
+    HTTPClient http;
+
+    http.setTimeout(REQUEST_TIMEOUT_MS);
+
+    if (!http.begin(
+        client,
+        apiBaseUrl + "/api/v1/devices/me/scenario"
+    )) {
+        return false;
+    }
+
+    http.addHeader(
+        "Authorization",
+        "Bearer " + token
+    );
+
+    http.addHeader(
+        "Accept",
+        "application/json"
+    );
+
+    const int code = http.GET();
+
+    if (code != 200) {
+        Serial.printf(
+            "[ScenarioSync] Manifest GET: %d; cache preserved\n",
+            code
+        );
+
+        http.end();
+        return false;
+    }
+
+    String payload = http.getString();
+    http.end();
+
+    JsonDocument doc;
+
+    if (deserializeJson(doc, payload) !=
+        DeserializationError::Ok) {
+        Serial.println(
+            "[ScenarioSync] Invalid manifest JSON"
+        );
+        return false;
+    }
+
+    JsonArray points = doc["points"].as<JsonArray>();
+
+    if (points.isNull()) {
+        return false;
+    }
+
+    SensorScenarioAssignment previous[2];
+
+    {
+        std::lock_guard<std::mutex> lock(
+            assignmentsMutex
+        );
+
+        previous[0] = assignments_[0];
+        previous[1] = assignments_[1];
+    }
+
+    // A configuração antiga continua válida em memória
+    // até a nova ter seus arquivos disponíveis.
+    SensorScenarioAssignment next[2];
+
+    bool complete = true;
+    bool visited[2] = {false, false};
+
+    for (JsonObject point : points) {
+        const int sensorIndex =
+            point["sensorIndex"] | 0;
+
+        if (sensorIndex < 1 || sensorIndex > 2) {
+            continue;
+        }
+
+        const int index = sensorIndex - 1;
+
+        if (visited[index]) {
+            complete = false;
+            continue;
+        }
+
+        visited[index] = true;
+
+        JsonObject scenario =
+            point["scenario"].as<JsonObject>();
+
+        // Ponto sem cenário: fica sem atribuição.
+        if (scenario.isNull()) {
+            continue;
+        }
+
+        const String scenarioId =
+            String(scenario["id"] | "");
+
+        const String audioUri =
+            String(scenario["audioUri"] | "");
+
+        const String revision =
+            String(scenario["audioRevision"] | "");
+
+        const String expectedUri =
+            "/api/v1/scenarios/" +
+            scenarioId +
+            "/audio";
+
+        if (!isUuid(scenarioId) ||
+            !isUuid(revision) ||
+            audioUri != expectedUri) {
+            complete = false;
+
+            next[index] = previous[index];
+            continue;
+        }
+
+        const String localPath = cacheAudioPath(
+            scenarioId,
+            revision
+        );
+
+        if (localPath.isEmpty()) {
+            complete = false;
+            next[index] = previous[index];
+            continue;
+        }
+
+        bool cached = LittleFS.exists(localPath);
+
+        if (cached) {
+            File file = LittleFS.open(
+                localPath,
+                "r"
+            );
+
+            cached = file &&
+                file.size() > 0;
+
+            if (file) {
+                file.close();
+            }
+        }
+
+        if (!cached) {
+            const bool downloaded =
+                downloadAndStoreAudio(
+                    audioUri,
+                    scenarioId,
+                    revision,
+                    localPath
+                );
+
+            if (!downloaded) {
+                next[index] = previous[index];
+                complete = false;
+                continue;
+            }
+        }
+
+        next[index].has = true;
+        next[index].scenarioId = scenarioId;
+        next[index].audioPath = localPath;
+        next[index].audioRevision = revision;
+    }
+
+    const bool changed =
+        !same(next[0], previous[0]) ||
+        !same(next[1], previous[1]);
+
+    if (changed && !persistAssignments(next)) {
+        Serial.println(
+            "[ScenarioSync] Failed to persist assignments"
+        );
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(
+            assignmentsMutex
+        );
+
+        assignments_[0] = next[0];
+        assignments_[1] = next[1];
+    }
+
+    if (complete) {
+        Serial.println(
+            "[ScenarioSync] Synchronization completed"
+        );
+    }
+
+    return complete;
 }
 
-void ScenarioSyncService::postEvent(const char *type,
-                                    const String &scenarioIdOrNullJson) {
-  String token = String(authenticator.issueToken().c_str());
-  if (token.length() == 0)
-    return;
-  String url = apiBaseUrl + "/api/v1/devices/me/events";
-  HTTPClient http;
-  {
+bool ScenarioSyncService::authorizePlayback() {
+    if (WiFi.status() != WL_CONNECTED ||
+        !apiBaseUrl.startsWith("http://")) {
+        return false;
+    }
+
+    String token = String(
+        authenticator.issueToken().c_str()
+    );
+
+    if (token.isEmpty()) {
+        return false;
+    }
+
     WiFiClient client;
-    http.begin(client, url);
-  }
-  http.addHeader("Authorization", "Bearer " + token);
-  http.addHeader("Content-Type", "application/json");
-  String body;
-  if (scenarioIdOrNullJson == "null") {
-    body = String("{\"type\":\"") + type + "\",\"scenarioId\":null}";
-  } else {
-    body = String("{\"type\":\"") + type + "\",\"scenarioId\":\"" +
-           scenarioIdOrNullJson + "\"}";
-  }
-  int code = http.POST((uint8_t *)body.c_str(), body.length());
-  if (code != 202) {
-    Serial.printf("[ScenarioSync] event %s -> %d\n", type, code);
-  }
-  http.end();
+    HTTPClient http;
+
+    http.setTimeout(1800);
+
+    if (!http.begin(
+        client,
+        apiBaseUrl +
+        "/api/v1/devices/me/playback-authorization"
+    )) {
+        return false;
+    }
+
+    http.addHeader(
+        "Authorization",
+        "Bearer " + token
+    );
+
+    const int status = http.GET();
+    http.end();
+
+    return status == 204;
+}
+
+void ScenarioSyncService::postEvent(
+    const char *type,
+    const String &scenarioIdOrNullJson
+) {
+    if (WiFi.status() != WL_CONNECTED ||
+        !apiBaseUrl.startsWith("http://")) {
+        return;
+    }
+
+    String token = String(
+        authenticator.issueToken().c_str()
+    );
+
+    if (token.isEmpty()) {
+        return;
+    }
+
+    WiFiClient client;
+    HTTPClient http;
+
+    http.setTimeout(1800);
+
+    if (!http.begin(
+        client,
+        apiBaseUrl + "/api/v1/devices/me/events"
+    )) {
+        return;
+    }
+
+    http.addHeader(
+        "Authorization",
+        "Bearer " + token
+    );
+
+    http.addHeader(
+        "Content-Type",
+        "application/json"
+    );
+
+    const String scenarioValue =
+        scenarioIdOrNullJson == "null"
+            ? "null"
+            : String("\"") +
+              scenarioIdOrNullJson +
+              "\"";
+
+    const String body =
+        String("{\"type\":\"") +
+        type +
+        "\",\"scenarioId\":" +
+        scenarioValue +
+        "}";
+
+    const int code = http.POST(
+        reinterpret_cast<uint8_t *>(
+            const_cast<char *>(body.c_str())
+        ),
+        body.length()
+    );
+
+    if (code != 202) {
+        Serial.printf(
+            "[ScenarioSync] Event %s -> HTTP %d\n",
+            type,
+            code
+        );
+    }
+
+    http.end();
 }
