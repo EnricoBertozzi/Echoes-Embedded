@@ -51,7 +51,8 @@ void DeviceRegisterLogger::onKeySaveFailed() {
 }
 
 void DeviceRegisterLogger::onTokenIssued(const std::string &token) {
-  Serial.printf("[Register] platform access token: %s\n", token.c_str());
+  (void)token;
+  Serial.println("[Register] platform access token issued (hidden)");
 }
 
 void DeviceRegisterLogger::onClockNotSynced() {

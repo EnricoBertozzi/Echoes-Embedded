@@ -37,18 +37,18 @@ EspMqttClient::EspMqttClient(const std::string &uri, const std::string &mac)
   connectedSem = xSemaphoreCreateBinary();
 
   esp_mqtt_client_config_t config = {};
-  config.uri = this->uri.c_str();
-  config.client_id = this->clientId.c_str();
-  config.keepalive = 60;
-  config.disable_auto_reconnect = true; // connect()/disconnect() drive it
+  config.broker.address.uri = this->uri.c_str();
+  config.credentials.client_id = this->clientId.c_str();
+  config.session.keepalive = 60;
+  config.network.disable_auto_reconnect = true; // connect()/disconnect() drive it
   // Verify the broker certificate against the bundled Mozilla roots
   // (esp-tls refuses TLS with no verification option at all).
-  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
   if (strlen(MQTT_USERNAME) > 0) {
-    config.username = MQTT_USERNAME;
+    config.credentials.username = MQTT_USERNAME;
   }
   if (strlen(MQTT_PASSWORD) > 0) {
-    config.password = MQTT_PASSWORD;
+    config.credentials.authentication.password = MQTT_PASSWORD;
   }
   client = esp_mqtt_client_init(&config);
   if (client == nullptr) {

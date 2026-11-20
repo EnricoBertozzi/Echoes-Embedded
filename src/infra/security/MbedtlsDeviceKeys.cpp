@@ -1,3 +1,4 @@
+#include "esp_random.h"
 #include "infra/security/MbedtlsDeviceKeys.hpp"
 #include <cstring>
 #include <esp_system.h>
@@ -35,7 +36,7 @@ bool MbedtlsDeviceKeys::load() {
     const int ret =
         mbedtls_pk_parse_key(&pk, reinterpret_cast<const unsigned char *>(
                                       pem.data()),
-                              pem.size(), nullptr, 0);
+                              pem.size(), nullptr, 0, rng, nullptr);
     if (ret != 0) {
       return false;
     }
@@ -105,7 +106,7 @@ bool MbedtlsDeviceKeys::sign(const std::string &message, std::string &der) {
 
   // In this mbedtls the int-returning variants carry the _ret suffix.
   unsigned char hash[32];
-  if (mbedtls_sha256_ret(
+  if (mbedtls_sha256(
           reinterpret_cast<const unsigned char *>(message.data()),
           message.size(), hash, 0) != 0) { // 0 = SHA-256 (not SHA-224)
     return false;
@@ -115,7 +116,7 @@ bool MbedtlsDeviceKeys::sign(const std::string &message, std::string &der) {
       sig[MBEDTLS_PK_SIGNATURE_MAX_SIZE]; // > MBEDTLS_ECDSA_MAX_LEN
   size_t sigLen = 0;
   const int ret = mbedtls_pk_sign(&pk, MBEDTLS_MD_SHA256, hash, sizeof(hash),
-                                  sig, &sigLen, rng, nullptr);
+                                  sig, sizeof(sig), &sigLen, rng, nullptr);
   if (ret != 0) {
     return false;
   }

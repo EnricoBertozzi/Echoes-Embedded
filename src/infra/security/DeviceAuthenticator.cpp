@@ -5,7 +5,8 @@
 namespace {
 // 2020-01-01: below this the clock is not synced and `exp` would be invalid.
 constexpr time_t MIN_VALID_TIME = 1577836800;
-constexpr long TOKEN_TTL_SECONDS = 300;
+// Keep tokens short-lived for scenario sync requests.
+constexpr long TOKEN_TTL_SECONDS = 120;
 } // namespace
 
 DeviceAuthenticator::DeviceAuthenticator(DeviceKeys &keys, std::string mac)

@@ -18,6 +18,7 @@ private:
 
   FileStorage &storage;
   std::string lineBuffer;
+  bool discardingLine{false};
   bool restoring{false};
   std::string restoreTarget;
   std::string restoreBuffer;

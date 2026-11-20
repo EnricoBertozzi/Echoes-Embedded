@@ -7,7 +7,6 @@ class AudioPlayer {
 public:
   virtual ~AudioPlayer() = default;
 
-  virtual void play(const Scenario &scenario) = 0;
-  virtual void pause(const PointId pointId) = 0;
-  virtual void stop(const PointId &pointId) = 0;
+  virtual bool play(const Scenario &scenario) = 0;
+  virtual bool stop() = 0;
 };

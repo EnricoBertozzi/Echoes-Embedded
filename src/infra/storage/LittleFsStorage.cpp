@@ -34,6 +34,20 @@ bool LittleFsStorage::load(const char *filename, std::string &out) {
   return true;
 }
 
+bool LittleFsStorage::size(const char *filename, size_t &out) {
+  out = 0;
+  if (!LittleFS.exists(filename)) {
+    return false;
+  }
+  File file = LittleFS.open(filename, FILE_READ);
+  if (!file) {
+    return false;
+  }
+  out = file.size();
+  file.close();
+  return true;
+}
+
 bool LittleFsStorage::exists(const char *filename) {
   return LittleFS.exists(filename);
 }

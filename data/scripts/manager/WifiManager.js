@@ -13,10 +13,12 @@ export class WifiManager {
   }
 
   setup() {
-    // First load only: fetch the last scan list so the page renders right
-    // away, before the first SSE event arrives. Updates come via SSE.
+    // First load only: fetch the last scan list and connection status so the
+    // page renders right away, before the first SSE event arrives. Updates
+    // come via SSE.
     this.#fetchWifiList();
-    this.#evt.addEventListener('status', e => this.#fetchStatus(e));
+    this.#fetchStatusOnce();
+    this.#evt.addEventListener('status', e => this.#handleStatusEvent(e));
     this.#evt.addEventListener('list', e => this.#fetchWifi(e));
   }
 
@@ -42,8 +44,26 @@ export class WifiManager {
     this.#notify('fetch');
   }
 
-  async #fetchStatus(evt) {
-    const data = JSON.parse(evt.data);
+  async #fetchStatusOnce() {
+    try {
+      const response = await fetch('/wifi-status');
+      if (!response.ok)
+        return;
+      this.#applyStatus(await response.json());
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  #handleStatusEvent(evt) {
+    try {
+      this.#applyStatus(JSON.parse(evt.data));
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  #applyStatus(data) {
     if (!data.ssid)
       return;
 

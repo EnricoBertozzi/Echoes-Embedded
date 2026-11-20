@@ -1,9 +1,9 @@
 #pragma once
 
-#include "application/hardware/WifiSTA.hpp"
 #include "application/hardware/WifiSTAObserver.hpp"
 #include "application/hardware/dto/WifiScanDto.hpp"
 #include "application/service/PortalActivity.hpp"
+#include "application/service/WifiService.hpp"
 #include <ESPAsyncWebServer.h>
 #include <atomic>
 #include <mutex>
@@ -11,7 +11,8 @@
 
 class SetupController : public WifiSTAObserver, public PortalActivity {
 public:
-  SetupController(WifiSTA &wifiSTA) : wifiSTA(wifiSTA) {}
+  explicit SetupController(WifiService &wifiService)
+      : wifiService(wifiService) {}
   ~SetupController();
   void setup();
   void start();
@@ -32,12 +33,17 @@ private:
   AsyncWebServer server{80};
   AsyncEventSource events{"/events"};
   AsyncCallbackJsonWebHandler *setupHandler{nullptr};
-  WifiSTA &wifiSTA;
+  WifiService &wifiService;
 
   // Last scan list, served on GET /wifi-list so the page can render
   // something before the first SSE event arrives.
   std::mutex scanMutex;
   std::vector<WifiScanDto> lastScan;
+
+  // Last connection status, served on GET /wifi-status so a page reload can
+  // restore the connected-network card before the next SSE event arrives.
+  std::mutex statusMutex;
+  WifiScanDto lastStatus;
 
   // Written by the web server task, read by the registrar task.
   std::atomic<uint32_t> lastRequestMs{0};
@@ -45,9 +51,11 @@ private:
   void touch();
   void handleSetup(AsyncWebServerRequest *request, JsonVariant &json);
   void handleScanList(AsyncWebServerRequest *request);
+  void handleStatus(AsyncWebServerRequest *request);
   void handleFile(AsyncWebServerRequest *request);
   String getContentType(String filename);
   String serializeScanList(const std::vector<WifiScanDto> &scanList) const;
+  String serializeStatus(const WifiScanDto &status) const;
 
   // WifiSTAObserver
   void updateStatus(const WifiScanDto &connectDto, WifiStatus status);

@@ -17,6 +17,9 @@ void SetupController::setup() {
   server.on("/wifi-list", HTTP_GET, [this](AsyncWebServerRequest *request) {
     this->handleScanList(request);
   });
+  server.on("/wifi-status", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    this->handleStatus(request);
+  });
   server.onNotFound(
       [this](AsyncWebServerRequest *request) { this->handleFile(request); });
 }
@@ -64,7 +67,9 @@ void SetupController::handleSetup(AsyncWebServerRequest *request,
   WifiConnectDto dto{ssid.c_str(), password.c_str(), ip.c_str(),
                      gateway.c_str(), subnet.c_str()};
 
-  wifiSTA.connect(dto);
+  // WifiService remembers the credentials and only persists them after the
+  // STA obtains an IP, so a failed attempt never overwrites a working setup.
+  wifiService.connect(dto);
 
   auto *response = request->beginResponse(200);
   response->addHeader("Cache-Control", "no-store");
@@ -84,6 +89,18 @@ void SetupController::handleScanList(AsyncWebServerRequest *request) {
   request->send(response);
 }
 
+void SetupController::handleStatus(AsyncWebServerRequest *request) {
+  touch();
+  String json;
+  {
+    std::lock_guard<std::mutex> lock(statusMutex);
+    json = serializeStatus(lastStatus);
+  }
+  auto *response = request->beginResponse(200, "application/json", json);
+  response->addHeader("Cache-Control", "no-store");
+  request->send(response);
+}
+
 void SetupController::handleFile(AsyncWebServerRequest *request) {
   touch();
   String path = request->url();
@@ -91,9 +108,13 @@ void SetupController::handleFile(AsyncWebServerRequest *request) {
   if (path == "/")
     path = "/index.html";
 
+  // Block protected files and folders from being served.
+  if (path == "/private.pem" || path.startsWith("/audio/")) {
+    path = "/index.html";
+  }
+
   // Only web assets are served. Anything else — captive portal probes and
-  // device files such as /private.pem — falls back to the app page, never
-  // to the filesystem.
+  // device files — falls back to the app page, never to the filesystem.
   const bool servable = path == "/index.html" || path == "/icon.svg" ||
                         path.startsWith("/styles/") ||
                         path.startsWith("/scripts/");
@@ -145,6 +166,17 @@ String SetupController::serializeScanList(
   return json;
 }
 
+String SetupController::serializeStatus(const WifiScanDto &status) const {
+  JsonDocument doc;
+  doc["ssid"] = status.ssid;
+  doc["status"] = static_cast<int>(status.status);
+  doc["rssi"] = status.rssi;
+  doc["secure"] = status.secure;
+  String json;
+  serializeJson(doc, json);
+  return json;
+}
+
 void SetupController::onConnect(const WifiScanDto &connectDto) {
   updateStatus(connectDto, WifiStatus::WIFI_CONNECTED);
 }
@@ -163,13 +195,14 @@ void SetupController::onDisconnect(const WifiScanDto &connectDto) {
 
 void SetupController::updateStatus(const WifiScanDto &connectDto,
                                    WifiStatus status) {
-  JsonDocument doc;
-  doc["ssid"] = connectDto.ssid;
-  doc["status"] = static_cast<int>(status);
-  doc["rssi"] = connectDto.rssi;
-  doc["secure"] = connectDto.secure;
+  WifiScanDto snapshot = connectDto;
+  snapshot.status = status;
   String json;
-  serializeJson(doc, json);
+  {
+    std::lock_guard<std::mutex> lock(statusMutex);
+    lastStatus = snapshot;
+    json = serializeStatus(lastStatus);
+  }
   events.send(json, "status");
 }
 
