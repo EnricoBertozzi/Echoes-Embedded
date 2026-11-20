@@ -23,8 +23,11 @@ std::string DeviceAuthenticator::issueToken() {
   }
 
   // The hardware id (MAC) is hexadecimal with colons, no JSON escaping needed.
+  // iat é obrigatório no servidor (S12); exp fica dentro de 5 min.
   const std::string payloadJson = "{\"iss\":\"echoes-device\",\"hardware_id\":\"" +
-                                  mac + "\",\"exp\":" +
+                                  mac + "\",\"iat\":" +
+                                  std::to_string(now) +
+                                  ",\"exp\":" +
                                   std::to_string(now + TOKEN_TTL_SECONDS) +
                                   "}";
 
