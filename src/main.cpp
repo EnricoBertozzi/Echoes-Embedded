@@ -207,7 +207,8 @@ void controlTask(void *param) {
             continue;
         }
 
-        if (!ctx->service->authorizePlayback()) {
+        // autorização local (sem HTTP por toque): RNF02/RNF03
+        if (!ctx->service->playbackAllowed()) {
             Serial.printf(
                 "[FSR %d] Playback not authorized\n",
                 sensorIndex
@@ -260,20 +261,17 @@ void guardTask(void *param) {
     auto *ctx = static_cast<GuardTaskContext *>(param);
 
     while (true) {
-        if (ctx->playingSensor->load() != 0) {
-            const bool authorized =
-                ctx->service->authorizePlayback();
+        // só verifica a validade local: a renovação acontece no sync
+        if (ctx->playingSensor->load() != 0 &&
+            !ctx->service->playbackAllowed()) {
+            ctx->audio1->stop();
+            ctx->audio2->stop();
 
-            if (!authorized) {
-                ctx->audio1->stop();
-                ctx->audio2->stop();
+            ctx->playingSensor->store(0);
 
-                ctx->playingSensor->store(0);
-
-                Serial.println(
-                    "[PlaybackGuard] Playback blocked or connection lost"
-                );
-            }
+            Serial.println(
+                "[PlaybackGuard] Playback authorization expired or revoked"
+            );
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));

@@ -1,11 +1,13 @@
 
 #include "application/service/ScenarioSyncService.hpp"
+#include "Config.h"
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <mbedtls/sha256.h>
 
 #include <algorithm>
@@ -13,7 +15,44 @@
 #include <cctype>
 #include <string>
 
+// Bundle de CAs públicas gerado pelo IDF (o mesmo que o MQTT usa) (S3).
+extern const uint8_t x509_crt_bundle[];
+
+#ifndef API_ALLOW_PLAIN_HTTP
+// HTTP puro só para laboratório isolado; em produção deixe 0 (S3).
+#define API_ALLOW_PLAIN_HTTP 0
+#endif
+
 namespace {
+
+// Só aceita HTTPS, salvo HTTP explicitamente liberado para laboratório.
+bool isAllowedApiUrl(const String &url) {
+#if API_ALLOW_PLAIN_HTTP
+    if (url.startsWith("http://")) {
+        return true;
+    }
+#endif
+    return url.startsWith("https://");
+}
+
+// Abre a requisição. HTTPS valida o certificado do servidor contra as CAs
+// do bundle; HTTP só é usado quando liberado acima.
+bool beginRequest(
+    HTTPClient &http,
+    const String &url,
+    WiFiClient &plain,
+    WiFiClientSecure &secure,
+    uint32_t timeoutMs
+) {
+    http.setTimeout(timeoutMs);
+
+    if (url.startsWith("https://")) {
+        secure.setCACertBundle(x509_crt_bundle);
+        return http.begin(secure, url);
+    }
+
+    return http.begin(plain, url);
+}
 
 constexpr size_t MAX_AUDIO_BYTES = 512 * 1024;
 constexpr uint32_t REQUEST_TIMEOUT_MS = 5000;
@@ -287,8 +326,8 @@ bool ScenarioSyncService::downloadAndStoreAudio(
         return false;
     }
 
-    // Transporte HTTP para o ambiente local de demonstração.
-    if (!apiBaseUrl.startsWith("http://")) {
+    // Transporte: HTTPS (ou HTTP só em laboratório liberado).
+    if (!isAllowedApiUrl(apiBaseUrl)) {
         Serial.println(
             "[ScenarioSync] Unsupported API transport"
         );
@@ -306,14 +345,16 @@ bool ScenarioSyncService::downloadAndStoreAudio(
         return false;
     }
 
-    WiFiClient client;
+    WiFiClient plain;
+    WiFiClientSecure secure;
     HTTPClient http;
 
-    http.setTimeout(REQUEST_TIMEOUT_MS);
-
-    if (!http.begin(
-        client,
-        apiBaseUrl + audioUrlPath
+    if (!beginRequest(
+        http,
+        apiBaseUrl + audioUrlPath,
+        plain,
+        secure,
+        REQUEST_TIMEOUT_MS
     )) {
         return false;
     }
@@ -463,7 +504,7 @@ bool ScenarioSyncService::downloadAndStoreAudio(
 
 bool ScenarioSyncService::sync() {
     if (WiFi.status() != WL_CONNECTED ||
-        !apiBaseUrl.startsWith("http://")) {
+        !isAllowedApiUrl(apiBaseUrl)) {
         return false;
     }
 
@@ -475,14 +516,16 @@ bool ScenarioSyncService::sync() {
         return false;
     }
 
-    WiFiClient client;
+    WiFiClient plain;
+    WiFiClientSecure secure;
     HTTPClient http;
 
-    http.setTimeout(REQUEST_TIMEOUT_MS);
-
-    if (!http.begin(
-        client,
-        apiBaseUrl + "/api/v1/devices/me/scenario"
+    if (!beginRequest(
+        http,
+        apiBaseUrl + "/api/v1/devices/me/scenario",
+        plain,
+        secure,
+        REQUEST_TIMEOUT_MS
     )) {
         return false;
     }
@@ -499,6 +542,10 @@ bool ScenarioSyncService::sync() {
 
     const int code = http.GET();
 
+    if (code == 401 || code == 403) {
+        revokePlaybackAuthorization();
+    }
+
     if (code != 200) {
         Serial.printf(
             "[ScenarioSync] Manifest GET: %d; cache preserved\n",
@@ -508,6 +555,9 @@ bool ScenarioSyncService::sync() {
         http.end();
         return false;
     }
+
+    // 200 no manifesto = dispositivo ativo e autorizado para reproduzir
+    markPlaybackAuthorized();
 
     String payload = http.getString();
     http.end();
@@ -672,42 +722,22 @@ bool ScenarioSyncService::sync() {
     return complete;
 }
 
-bool ScenarioSyncService::authorizePlayback() {
-    if (WiFi.status() != WL_CONNECTED ||
-        !apiBaseUrl.startsWith("http://")) {
+void ScenarioSyncService::markPlaybackAuthorized() {
+    playbackAuthAtMs_.store(millis());
+    playbackAuthSeen_.store(true);
+}
+
+void ScenarioSyncService::revokePlaybackAuthorization() {
+    playbackAuthSeen_.store(false);
+}
+
+bool ScenarioSyncService::playbackAllowed() const {
+    if (!playbackAuthSeen_.load()) {
         return false;
     }
 
-    String token = String(
-        authenticator.issueToken().c_str()
-    );
-
-    if (token.isEmpty()) {
-        return false;
-    }
-
-    WiFiClient client;
-    HTTPClient http;
-
-    http.setTimeout(1800);
-
-    if (!http.begin(
-        client,
-        apiBaseUrl +
-        "/api/v1/devices/me/playback-authorization"
-    )) {
-        return false;
-    }
-
-    http.addHeader(
-        "Authorization",
-        "Bearer " + token
-    );
-
-    const int status = http.GET();
-    http.end();
-
-    return status == 204;
+    return (millis() - playbackAuthAtMs_.load()) <
+        PLAYBACK_AUTH_TTL_MS;
 }
 
 void ScenarioSyncService::postEvent(
@@ -715,7 +745,7 @@ void ScenarioSyncService::postEvent(
     const String &scenarioIdOrNullJson
 ) {
     if (WiFi.status() != WL_CONNECTED ||
-        !apiBaseUrl.startsWith("http://")) {
+        !isAllowedApiUrl(apiBaseUrl)) {
         return;
     }
 
@@ -727,14 +757,16 @@ void ScenarioSyncService::postEvent(
         return;
     }
 
-    WiFiClient client;
+    WiFiClient plain;
+    WiFiClientSecure secure;
     HTTPClient http;
 
-    http.setTimeout(1800);
-
-    if (!http.begin(
-        client,
-        apiBaseUrl + "/api/v1/devices/me/events"
+    if (!beginRequest(
+        http,
+        apiBaseUrl + "/api/v1/devices/me/events",
+        plain,
+        secure,
+        1800
     )) {
         return;
     }
