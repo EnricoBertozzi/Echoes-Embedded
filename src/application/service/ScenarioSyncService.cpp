@@ -15,9 +15,6 @@
 #include <cctype>
 #include <string>
 
-// Bundle de CAs públicas gerado pelo IDF (o mesmo que o MQTT usa) (S3).
-extern const uint8_t x509_crt_bundle[];
-
 #ifndef API_ALLOW_PLAIN_HTTP
 // HTTP puro só para laboratório isolado; em produção deixe 0 (S3).
 #define API_ALLOW_PLAIN_HTTP 0
@@ -47,7 +44,8 @@ bool beginRequest(
     http.setTimeout(timeoutMs);
 
     if (url.startsWith("https://")) {
-        secure.setCACertBundle(x509_crt_bundle);
+        // bundle de CAs públicas do IDF, o mesmo que o MQTT usa (S3)
+        secure.useBuiltinCACertBundle();
         return http.begin(secure, url);
     }
 
