@@ -42,11 +42,12 @@ std::string trimmed(std::string s) {
 std::string ackTopicFor(const std::string &mac) {
   std::string topic(MQTT_ACK_TOPIC);
   // {mac} is the legacy placeholder, still accepted for old .env files.
-  for (const char *placeholder : {"{hardware_id}", "{mac}"}) {
+  for (const char *placeholder : {"{hardware_id}", "{hardwareId}", "{mac}"}) {
     const std::string token(placeholder);
-    const size_t pos = topic.find(token);
-    if (pos != std::string::npos) {
+    size_t pos = 0;
+    while ((pos = topic.find(token, pos)) != std::string::npos) {
       topic.replace(pos, token.size(), mac);
+      pos += mac.size();
     }
   }
   return topic;
@@ -231,7 +232,11 @@ DeviceRegister::RegisterResult DeviceRegister::registerDevice() {
 
   std::string ack;
   if (!waitForAck(ack, 15000)) {
-    retryLater(generated, "no registration ack (is the platform online?)");
+    const std::string reason =
+        "no registration ack; publish=" + std::string(MQTT_REGISTRATION_TOPIC) +
+        ", subscribe=" + ackTopicFor(mac) +
+        "; check platform and broker permissions for both clients";
+    retryLater(generated, reason.c_str());
     return RegisterResult::Retry;
   }
 

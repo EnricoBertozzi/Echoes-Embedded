@@ -11,7 +11,10 @@
 // Backend API (Echoes-Server)
 // HTTPS obrigatório em produção. 1 = permite http:// (somente laboratório isolado) (S3)
 #define API_ALLOW_PLAIN_HTTP 1
+// API_BASE_URL em .env/ambiente pode substituir este padrão.
+#ifndef API_BASE_URL
 #define API_BASE_URL "http://192.168.1.50:8080"
+#endif
 
 // FSR
 #define FSR_1 32

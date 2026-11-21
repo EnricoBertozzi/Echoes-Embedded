@@ -1,63 +1,139 @@
 
 #include "application/service/ScenarioSyncService.hpp"
-#include "Config.h"
 
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiClientSecure.h>
+#include <esp_crt_bundle.h>
+#include <esp_http_client.h>
 #include <mbedtls/sha256.h>
 
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
+#include <cstring>
 #include <string>
-
-#ifndef API_ALLOW_PLAIN_HTTP
-// HTTP puro só para laboratório isolado; em produção deixe 0 (S3).
-#define API_ALLOW_PLAIN_HTTP 0
-#endif
 
 namespace {
 
-// Só aceita HTTPS, salvo HTTP explicitamente liberado para laboratório.
-bool isAllowedApiUrl(const String &url) {
-#if API_ALLOW_PLAIN_HTTP
-    if (url.startsWith("http://")) {
-        return true;
-    }
-#endif
-    return url.startsWith("https://");
-}
-
-// Abre a requisição. HTTPS valida o certificado do servidor contra as CAs
-// do bundle; HTTP só é usado quando liberado acima.
-bool beginRequest(
-    HTTPClient &http,
-    const String &url,
-    WiFiClient &plain,
-    WiFiClientSecure &secure,
-    uint32_t timeoutMs
-) {
-    http.setTimeout(timeoutMs);
-
-    if (url.startsWith("https://")) {
-        // bundle de CAs públicas do IDF, o mesmo que o MQTT usa (S3)
-        secure.useBuiltinCACertBundle();
-        return http.begin(secure, url);
-    }
-
-    return http.begin(plain, url);
-}
-
-constexpr size_t MAX_AUDIO_BYTES = 512 * 1024;
+constexpr size_t STORAGE_RESERVE_BYTES = 8 * 1024;
+constexpr size_t MAX_MANIFEST_BYTES = 16 * 1024;
 constexpr uint32_t REQUEST_TIMEOUT_MS = 5000;
-constexpr uint32_t CHUNK_TIMEOUT_MS = 5000;
 
 constexpr char NVS_NAMESPACE[] = "echoes_sync";
 constexpr char NVS_KEY[] = "manifest";
+
+// Each request owns its client; IDF decodes chunked bodies and validates HTTPS with the bundle.
+class ApiRequest {
+public:
+    ApiRequest(const String &url, const std::string &token, int timeoutMs)
+        : url(url) {
+        if (token.empty() ||
+            (!url.startsWith("http://") && !url.startsWith("https://"))) {
+            return;
+        }
+
+        esp_http_client_config_t config = {};
+        config.url = this->url.c_str();
+        config.timeout_ms = timeoutMs;
+        config.crt_bundle_attach = esp_crt_bundle_attach;
+        config.disable_auto_redirect = true;
+        client = esp_http_client_init(&config);
+        if (client) {
+            const std::string authorization = "Bearer " + token;
+            if (esp_http_client_set_header(client, "Authorization",
+                                           authorization.c_str()) != ESP_OK ||
+                esp_http_client_set_header(client, "Accept-Encoding",
+                                           "identity") != ESP_OK) {
+                esp_http_client_cleanup(client);
+                client = nullptr;
+            }
+        }
+    }
+
+    ~ApiRequest() {
+        if (client) {
+            esp_http_client_cleanup(client);
+        }
+    }
+
+    ApiRequest(const ApiRequest &) = delete;
+    ApiRequest &operator=(const ApiRequest &) = delete;
+
+    int open(const char *accept, const String *body = nullptr) {
+        if (!client ||
+            esp_http_client_set_header(client, "Accept", accept) != ESP_OK ||
+            esp_http_client_set_method(client, body ? HTTP_METHOD_POST
+                                                    : HTTP_METHOD_GET) != ESP_OK) {
+            return -1;
+        }
+        if (body && esp_http_client_set_header(
+                        client, "Content-Type", "application/json") != ESP_OK) {
+            return -1;
+        }
+        if (esp_http_client_open(client, body ? body->length() : 0) != ESP_OK) {
+            return -1;
+        }
+        if (body) {
+            size_t sent = 0;
+            while (sent < body->length()) {
+                const int written = esp_http_client_write(
+                    client, body->c_str() + sent, body->length() - sent);
+                if (written <= 0) {
+                    return -1;
+                }
+                sent += written;
+            }
+        }
+        if (esp_http_client_fetch_headers(client) < 0) {
+            return -1;
+        }
+        return esp_http_client_get_status_code(client);
+    }
+
+    int64_t length() const {
+        return esp_http_client_get_content_length(client);
+    }
+
+    bool chunked() const {
+        return esp_http_client_is_chunked_response(client);
+    }
+
+    bool complete() const {
+        return esp_http_client_is_complete_data_received(client);
+    }
+
+    int read(char *buffer, size_t size) {
+        return esp_http_client_read(client, buffer, size);
+    }
+
+    bool readManifest(String &payload) {
+        if ((!chunked() && length() <= 0) ||
+            length() > static_cast<int64_t>(MAX_MANIFEST_BYTES)) {
+            return false;
+        }
+        char buffer[1024];
+        while (true) {
+            const int count = read(buffer, sizeof(buffer));
+            if (count < 0) {
+                return false;
+            }
+            if (count == 0) {
+                return complete() && !payload.isEmpty() &&
+                       (chunked() ||
+                        payload.length() == static_cast<size_t>(length()));
+            }
+            if (payload.length() + count > MAX_MANIFEST_BYTES ||
+                !payload.concat(buffer, count)) {
+                return false;
+            }
+        }
+    }
+
+private:
+    const String url;
+    esp_http_client_handle_t client = nullptr;
+};
 
 bool isUuid(const String &value) {
     if (value.length() != 36) {
@@ -324,80 +400,33 @@ bool ScenarioSyncService::downloadAndStoreAudio(
         return false;
     }
 
-    // Transporte: HTTPS (ou HTTP só em laboratório liberado).
-    if (!isAllowedApiUrl(apiBaseUrl)) {
-        Serial.println(
-            "[ScenarioSync] Unsupported API transport"
-        );
-        return false;
-    }
-
-    String token = String(
-        authenticator.issueToken().c_str()
-    );
-
-    if (token.isEmpty()) {
-        Serial.println(
-            "[ScenarioSync] Cannot generate device JWT"
-        );
-        return false;
-    }
-
-    WiFiClient plain;
-    WiFiClientSecure secure;
-    HTTPClient http;
-
-    if (!beginRequest(
-        http,
-        apiBaseUrl + audioUrlPath,
-        plain,
-        secure,
-        REQUEST_TIMEOUT_MS
-    )) {
-        return false;
-    }
-
-    http.addHeader(
-        "Authorization",
-        "Bearer " + token
-    );
-
-    http.addHeader(
-        "Accept",
-        "audio/mpeg"
-    );
-
-    const int status = http.GET();
+    ApiRequest http(apiBaseUrl + audioUrlPath,
+                    authenticator.issueToken(), REQUEST_TIMEOUT_MS);
+    const int status = http.open("audio/mpeg");
 
     if (status != 200) {
         Serial.printf(
             "[ScenarioSync] Audio GET failed: %d\n",
             status
         );
-        http.end();
         return false;
     }
 
-    const int contentLen = http.getSize();
+    const String temporaryPath = destinationPath + ".tmp";
+    LittleFS.remove(temporaryPath);
 
-    if (contentLen <= 0 ||
-        static_cast<size_t>(contentLen) >
-            MAX_AUDIO_BYTES ||
-        littleFsFreeBytes() <
-            static_cast<size_t>(contentLen) + 8192) {
+    const int64_t contentLen = http.length();
+    const size_t freeBytes = littleFsFreeBytes();
+    const size_t budget = freeBytes > STORAGE_RESERVE_BYTES
+        ? freeBytes - STORAGE_RESERVE_BYTES : 0;
 
+    if (budget == 0 || (!http.chunked() && contentLen <= 0) ||
+        contentLen > static_cast<int64_t>(budget)) {
         Serial.println(
             "[ScenarioSync] Invalid audio size or insufficient storage"
         );
-
-        http.end();
         return false;
     }
-
-    const String temporaryPath =
-        destinationPath + ".tmp";
-
-    LittleFS.remove(temporaryPath);
 
     File file = LittleFS.open(
         temporaryPath,
@@ -413,65 +442,43 @@ bool ScenarioSyncService::downloadAndStoreAudio(
             openError,
             static_cast<unsigned>(littleFsFreeBytes())
         );
-        http.end();
         return false;
     }
 
-    WiFiClient *stream = http.getStreamPtr();
-
-    int remaining = contentLen;
-    uint32_t lastProgress = millis();
-
+    size_t received = 0;
     uint8_t buffer[1024];
     bool error = false;
 
-    while (remaining > 0) {
-        const int available = stream->available();
-
-        if (available > 0) {
-            const size_t toRead = std::min(
-                static_cast<size_t>(remaining),
-                std::min(
-                    static_cast<size_t>(available),
-                    sizeof(buffer)
-                )
-            );
-
-            const int bytesRead =
-                stream->readBytes(
-                    buffer,
-                    toRead
-                );
-
-            if (bytesRead <= 0 ||
-                file.write(
-                    buffer,
-                    static_cast<size_t>(bytesRead)
-                ) != static_cast<size_t>(bytesRead)) {
-
-                error = true;
-                break;
-            }
-
-            remaining -= bytesRead;
-            lastProgress = millis();
-
-        } else if (
-            millis() - lastProgress > CHUNK_TIMEOUT_MS
-        ) {
+    while (true) {
+        // A zero read is only success when IDF saw the terminal chunk.
+        const int count = http.read(
+            reinterpret_cast<char *>(buffer), sizeof(buffer));
+        if (count < 0) {
             error = true;
             break;
-
-        } else {
-            delay(2);
         }
+        if (count == 0) {
+            break;
+        }
+        const size_t bytesRead = static_cast<size_t>(count);
+        if (bytesRead > budget - received ||
+            littleFsFreeBytes() < STORAGE_RESERVE_BYTES + bytesRead ||
+            file.write(buffer, bytesRead) != bytesRead) {
+            error = true;
+            break;
+        }
+        received += bytesRead;
+        // Let the decoder run while flash/network I/O is progressing.
+        delay(1);
     }
 
     file.flush();
+    error = error || file.getWriteError() || file.size() != received ||
+            littleFsFreeBytes() < STORAGE_RESERVE_BYTES;
     file.close();
-    http.end();
 
-    if (error || remaining != 0) {
+    if (error || received == 0 || !http.complete() ||
+        (!http.chunked() && received != static_cast<uint64_t>(contentLen))) {
         LittleFS.remove(temporaryPath);
 
         Serial.println(
@@ -492,73 +499,30 @@ bool ScenarioSyncService::downloadAndStoreAudio(
     }
 
     Serial.printf(
-        "[ScenarioSync] MP3 saved: %s (%d bytes)\n",
+        "[ScenarioSync] MP3 saved: %s (%u bytes)\n",
         destinationPath.c_str(),
-        contentLen
+        static_cast<unsigned>(received)
     );
 
     return true;
 }
 
 bool ScenarioSyncService::sync() {
-    if (WiFi.status() != WL_CONNECTED ||
-        !isAllowedApiUrl(apiBaseUrl)) {
+    if (WiFi.status() != WL_CONNECTED) {
         return false;
     }
 
-    String token = String(
-        authenticator.issueToken().c_str()
-    );
+    String payload;
+    {
+        ApiRequest http(apiBaseUrl + "/api/v1/devices/me/scenario",
+                        authenticator.issueToken(), REQUEST_TIMEOUT_MS);
+        const int code = http.open("application/json");
 
-    if (token.isEmpty()) {
-        return false;
+        Serial.printf("[ScenarioSync] Manifest GET: %d\n", code);
+        if (code != 200 || !http.readManifest(payload)) {
+            return false;
+        }
     }
-
-    WiFiClient plain;
-    WiFiClientSecure secure;
-    HTTPClient http;
-
-    if (!beginRequest(
-        http,
-        apiBaseUrl + "/api/v1/devices/me/scenario",
-        plain,
-        secure,
-        REQUEST_TIMEOUT_MS
-    )) {
-        return false;
-    }
-
-    http.addHeader(
-        "Authorization",
-        "Bearer " + token
-    );
-
-    http.addHeader(
-        "Accept",
-        "application/json"
-    );
-
-    const int code = http.GET();
-
-    if (code == 401 || code == 403) {
-        revokePlaybackAuthorization();
-    }
-
-    if (code != 200) {
-        Serial.printf(
-            "[ScenarioSync] Manifest GET: %d; cache preserved\n",
-            code
-        );
-
-        http.end();
-        return false;
-    }
-
-    // 200 no manifesto = dispositivo ativo e autorizado para reproduzir
-    markPlaybackAuthorized();
-
-    String payload = http.getString();
-    http.end();
 
     JsonDocument doc;
 
@@ -691,6 +655,11 @@ bool ScenarioSyncService::sync() {
         next[index].audioRevision = revision;
     }
 
+    // Publish only after every download succeeds; complete revisions stay cached.
+    if (!complete) {
+        return false;
+    }
+
     const bool changed =
         !same(next[0], previous[0]) ||
         !same(next[1], previous[1]);
@@ -720,93 +689,44 @@ bool ScenarioSyncService::sync() {
     return complete;
 }
 
-void ScenarioSyncService::markPlaybackAuthorized() {
-    playbackAuthAtMs_.store(millis());
-    playbackAuthSeen_.store(true);
-}
-
-void ScenarioSyncService::revokePlaybackAuthorization() {
-    playbackAuthSeen_.store(false);
-}
-
-bool ScenarioSyncService::playbackAllowed() const {
-    if (!playbackAuthSeen_.load()) {
+bool ScenarioSyncService::authorizePlayback() {
+    if (WiFi.status() != WL_CONNECTED) {
         return false;
     }
 
-    return (millis() - playbackAuthAtMs_.load()) <
-        PLAYBACK_AUTH_TTL_MS;
+    ApiRequest http(apiBaseUrl + "/api/v1/devices/me/playback-authorization",
+                    authenticator.issueToken(), 1800);
+    return http.open("application/json") == 204;
 }
 
-void ScenarioSyncService::postEvent(
+bool ScenarioSyncService::postEvent(
     const char *type,
-    const String &scenarioIdOrNullJson
+    const String &scenarioId
 ) {
-    if (WiFi.status() != WL_CONNECTED ||
-        !isAllowedApiUrl(apiBaseUrl)) {
-        return;
+    if (WiFi.status() != WL_CONNECTED || type == nullptr) {
+        return false;
     }
 
-    String token = String(
-        authenticator.issueToken().c_str()
-    );
-
-    if (token.isEmpty()) {
-        return;
+    const bool connection = std::strcmp(type, "CONNECTION") == 0;
+    if (connection ? !scenarioId.isEmpty()
+                   : ((std::strcmp(type, "PLAY") != 0 &&
+                       std::strcmp(type, "STOP") != 0) || !isUuid(scenarioId))) {
+        return false;
     }
 
-    WiFiClient plain;
-    WiFiClientSecure secure;
-    HTTPClient http;
-
-    if (!beginRequest(
-        http,
-        apiBaseUrl + "/api/v1/devices/me/events",
-        plain,
-        secure,
-        1800
-    )) {
-        return;
+    JsonDocument doc;
+    doc["type"] = type;
+    if (connection) {
+        doc["scenarioId"] = nullptr;
+    } else {
+        doc["scenarioId"] = scenarioId;
     }
+    String body;
+    serializeJson(doc, body);
 
-    http.addHeader(
-        "Authorization",
-        "Bearer " + token
-    );
-
-    http.addHeader(
-        "Content-Type",
-        "application/json"
-    );
-
-    const String scenarioValue =
-        scenarioIdOrNullJson == "null"
-            ? "null"
-            : String("\"") +
-              scenarioIdOrNullJson +
-              "\"";
-
-    const String body =
-        String("{\"type\":\"") +
-        type +
-        "\",\"scenarioId\":" +
-        scenarioValue +
-        "}";
-
-    const int code = http.POST(
-        reinterpret_cast<uint8_t *>(
-            const_cast<char *>(body.c_str())
-        ),
-        body.length()
-    );
-
-    if (code != 202) {
-        Serial.printf(
-            "[ScenarioSync] Event %s -> HTTP %d\n",
-            type,
-            code
-        );
-    }
-
-    http.end();
+    ApiRequest http(apiBaseUrl + "/api/v1/devices/me/events",
+                    authenticator.issueToken(), 1800);
+    const int code = http.open("application/json", &body);
+    Serial.printf("[ScenarioSync] Event %s -> HTTP %d\n", type, code);
+    return code == 202;
 }
