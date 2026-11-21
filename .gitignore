@@ -85,3 +85,6 @@ estrutura*.png
 estrutura*.jpg
 estrutura*.zip
 estrutura*.xz
+
+# dependências baixadas pelo gerenciador de componentes do ESP-IDF (recriadas no build)
+managed_components/
