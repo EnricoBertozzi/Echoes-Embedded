@@ -6,6 +6,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 
+#include <atomic>
 #include <mutex>
 
 struct SensorScenarioAssignment {
@@ -34,8 +35,13 @@ public:
         uint8_t sensorIndex1Based
     ) const;
 
-    // Falha de rede ou resposta diferente de 204 bloqueia áudio.
-    bool authorizePlayback();
+    bool loadPlaybackAuthorization();
+
+    // Consulta local; nunca faz HTTP ao pressionar um sensor.
+    bool isPlaybackAuthorized() const { return playbackAuthorized_.load(); }
+
+    // A task de rede atualiza a permissão; falhas temporárias preservam a decisão anterior.
+    void refreshPlaybackAuthorization();
 
     // Chamado pela task de rede; true somente quando a API aceita (202).
     bool postEvent(
@@ -52,6 +58,10 @@ private:
     mutable std::mutex assignmentsMutex;
 
     SensorScenarioAssignment assignments_[2];
+    std::atomic<bool> playbackAuthorized_{false};
+    bool playbackAuthorizationDirty_ = false;
+
+    void updatePlaybackAuthorization(bool allowed);
 
     bool ensureAudioDir();
 

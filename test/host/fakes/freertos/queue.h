@@ -22,7 +22,10 @@ inline int xQueuePeek(QueueHandle_t queue, void *out, TickType_t) {
     return pdTRUE;
 }
 inline int xQueueReceive(QueueHandle_t queue, void *out, TickType_t ticks) {
-    if (!xQueuePeek(queue, out, ticks)) return 0;
+    if (!xQueuePeek(queue, out, ticks)) {
+        if (ticks) delay(ticks);
+        return 0;
+    }
     queue->items.pop_front();
     return pdTRUE;
 }

@@ -17,7 +17,9 @@ struct DeviceRegister {
 struct ScenarioSyncService {
     std::vector<std::string> calls;
     int syncs = 0;
+    std::vector<uint32_t> authorizationChecks;
     std::function<bool(const char *)> report;
+    void refreshPlaybackAuthorization() { authorizationChecks.push_back(millis()); }
     bool postEvent(const char *type, const String &id = String()) {
         assert(id.empty() == (std::strcmp(type, "CONNECTION") == 0));
         calls.emplace_back(type);
@@ -29,7 +31,7 @@ struct ScenarioSyncService {
 #include "network-production.inc"
 
 struct Finished {};
-int main() {
+void eventOrderingTest() {
     ConnectionTracker connection;
     WifiSTAProxy wifi;
     PlaybackEventQueue events;
@@ -64,7 +66,7 @@ int main() {
     onDelay = [&] {
         assert(millis() < 60000); // detect stuck retries without sleeping
         if (!registration.accepted) {
-            assert(service.calls.empty() && service.syncs == 0);
+            assert(service.calls.empty() && service.syncs == 0 && service.authorizationChecks.empty());
             if (millis() >= 16000) registration.accepted = true;
         }
         if (stops == 1 && !reconnected) {
@@ -83,4 +85,55 @@ int main() {
     assert((service.calls == std::vector<std::string>{
         "CONNECTION", "CONNECTION", "CONNECTION", "PLAY", "PLAY", "STOP", "CONNECTION"}));
     std::cout << "PASS: HTTP waits for enrollment; connection acceptance/generation and ordered retries\n";
+}
+
+void hourlyAuthorizationTest(uint32_t start) {
+    fakeMillis = start;
+    WiFi.state = WL_CONNECTED;
+    ConnectionTracker connection;
+    WifiSTAProxy wifi;
+    PlaybackEventQueue events;
+    ScenarioSyncService service;
+    DeviceRegister registration;
+    registration.accepted = true;
+    service.report = [](const char *) { return true; };
+    SyncTaskContext context{&service, &wifi, &connection, &events, &registration};
+    int stage = 0;
+    onDelay = [&] {
+        const auto &checks = service.authorizationChecks;
+        if (checks.empty()) return; // initial task delay before enrollment/HTTP
+        switch (stage++) {
+        case 0:
+            fakeMillis = checks.front() + 3600000 - 100;
+            break;
+        case 1:
+            assert(checks.size() == 1);
+            break;
+        case 2:
+            assert(checks.size() == 2);
+            assert(static_cast<uint32_t>(checks[1] - checks[0]) == 3600000);
+            WiFi.state = 0;
+            connection.onDisconnect({});
+            break;
+        case 3:
+            assert(checks.size() == 2);
+            fakeMillis += 2 * 3600000;
+            WiFi.state = WL_CONNECTED;
+            connection.onConnect({});
+            break;
+        case 4:
+            assert(checks.size() == 3);
+            throw Finished{};
+        default: assert(false);
+        }
+    };
+    try { syncTask(&context); } catch (const Finished &) {}
+    onDelay = {};
+}
+
+int main() {
+    eventOrderingTest();
+    hourlyAuthorizationTest(0);
+    hourlyAuthorizationTest(UINT32_MAX - 30000);
+    std::cout << "PASS: authorization checks on connect/hourly/reconnect, including millis rollover\n";
 }

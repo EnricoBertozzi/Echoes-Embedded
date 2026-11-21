@@ -12,6 +12,11 @@
 #include <iostream>
 #include <limits>
 
+struct EspWifiAP {
+    int countConnect() const { return 0; }
+};
+#include "controls-production.inc"
+
 static time_t clockNow = 1795176000;
 static unsigned clockReads = 0;
 extern "C" time_t __wrap_time(time_t *out) {
@@ -72,8 +77,9 @@ void resetFakes() {
     httpReplies.clear();
     httpCalls.clear();
     LittleFS = {};
-    Preferences::manifest.clear();
+    Preferences::values.clear();
     Preferences::failWrite = false;
+    Preferences::writes = 0;
     File::writeLimit = std::numeric_limits<size_t>::max();
     File::flushError = false;
     WiFi.state = WL_CONNECTED;
@@ -104,7 +110,9 @@ void preflightTest(TestKeys &keys, DeviceAuthenticator &auth) {
         clockNow = failure == 1 ? 1000 : 1795176000;
         keys.signSucceeds = failure != 2;
         Serial.output.clear();
-        assert(!sync.sync() && !sync.postEvent("CONNECTION") && !sync.authorizePlayback());
+        assert(!sync.sync() && !sync.postEvent("CONNECTION"));
+        sync.refreshPlaybackAuthorization();
+        assert(!sync.isPlaybackAuthorized());
         assert(httpCalls.empty() && liveHttpClients == 0);
         const char *reason[] = {"key not loaded", "clock not synchronized", "signing failed"};
         assert(Serial.output.find(reason[failure]) != std::string::npos);
@@ -172,7 +180,7 @@ void downloadsTest(DeviceAuthenticator &auth) {
         ScenarioSyncService sync(auth, "https://lab.example", "MAC");
         seed(sync);
         const auto previous = sync.getAssignment(1);
-        const auto nvs = Preferences::manifest;
+        const auto nvs = Preferences::values["echoes_sync/manifest"];
         HttpReply audio{AUDIO, 200, std::string(4096, 'N')};
         switch (failure) {
         case 0: audio.length = 8192; audio.complete = false; break; // truncated length
@@ -196,7 +204,7 @@ void downloadsTest(DeviceAuthenticator &auth) {
         httpReplies.push_back(audio);
         assert(!sync.sync());
         assert(sync.getAssignment(1).audioPath == previous.audioPath);
-        assert(Preferences::manifest == nvs);
+        assert(Preferences::values["echoes_sync/manifest"] == nvs);
         assert(LittleFS.files.at(previous.audioPath)->bytes == "old audio");
         for (const auto &entry : LittleFS.files) {
             assert(!String(entry.first).endsWith(".tmp"));
@@ -247,13 +255,147 @@ void eventsApiTest(DeviceAuthenticator &auth) {
     assert(!sync.postEvent("PAUSE", ID));
     assert(!sync.postEvent("CONNECTION", ID));
     assert(!sync.postEvent(nullptr));
-    for (int status : {204, 200, 401, 403}) {
-        httpReplies.push_back({"/playback-authorization", status, ""});
-        assert(sync.authorizePlayback() == (status == 204));
-    }
     WiFi.state = 0;
-    assert(!sync.postEvent("CONNECTION") && !sync.authorizePlayback() && !sync.sync());
+    assert(!sync.postEvent("CONNECTION") && !sync.sync());
     assert(httpReplies.empty() && liveHttpClients == 0);
+}
+
+void authorizationTest(DeviceAuthenticator &auth) {
+    resetFakes();
+    ScenarioSyncService sync(auth, "https://lab.example/", "MAC");
+    assert(!sync.loadPlaybackAuthorization() && !sync.isPlaybackAuthorized());
+    httpReplies.push_back({"/playback-authorization", 500, ""});
+    sync.refreshPlaybackAuthorization();
+    assert(!sync.isPlaybackAuthorized());
+    httpReplies.push_back({"/playback-authorization", 204, ""});
+    sync.refreshPlaybackAuthorization();
+    assert(sync.isPlaybackAuthorized() && Preferences::writes == 1);
+    httpReplies.push_back({"/playback-authorization", 204, ""});
+    sync.refreshPlaybackAuthorization();
+    assert(Preferences::writes == 1); // unchanged decisions must not wear NVS every hour
+
+    for (int status : {200, 302, 404, 429, 500, 503}) {
+        httpReplies.push_back({"/playback-authorization", status, ""});
+        sync.refreshPlaybackAuthorization();
+        assert(sync.isPlaybackAuthorized());
+    }
+    HttpReply timeout{"/playback-authorization", 204, ""};
+    timeout.openError = true;
+    httpReplies.push_back(timeout);
+    sync.refreshPlaybackAuthorization();
+    assert(sync.isPlaybackAuthorized());
+    WiFi.state = 0;
+    sync.refreshPlaybackAuthorization();
+    const auto requestCount = httpCalls.size();
+    for (int i = 0; i < 100; ++i) assert(sync.isPlaybackAuthorized());
+    assert(httpCalls.size() == requestCount);
+
+    ScenarioSyncService restored(auth, "https://lab.example", "MAC");
+    assert(restored.loadPlaybackAuthorization() && restored.isPlaybackAuthorized());
+    ScenarioSyncService otherDevice(auth, "https://lab.example", "OTHER");
+    ScenarioSyncService otherApi(auth, "https://other.example", "MAC");
+    assert(!otherDevice.loadPlaybackAuthorization() && !otherDevice.isPlaybackAuthorized());
+    assert(!otherApi.loadPlaybackAuthorization() && !otherApi.isPlaybackAuthorized());
+
+    WiFi.state = WL_CONNECTED;
+    for (int denied : {401, 403}) {
+        httpReplies.push_back({"/playback-authorization", denied, ""});
+        sync.refreshPlaybackAuthorization();
+        assert(!sync.isPlaybackAuthorized());
+        assert(restored.loadPlaybackAuthorization() && !restored.isPlaybackAuthorized());
+        httpReplies.push_back({"/playback-authorization", 503, ""});
+        sync.refreshPlaybackAuthorization();
+        assert(!sync.isPlaybackAuthorized());
+        httpReplies.push_back({"/playback-authorization", 204, ""});
+        sync.refreshPlaybackAuthorization();
+        assert(sync.isPlaybackAuthorized());
+
+        httpReplies.push_back({MANIFEST, denied, ""});
+        assert(!sync.sync() && !sync.isPlaybackAuthorized());
+        assert(restored.loadPlaybackAuthorization() && !restored.isPlaybackAuthorized());
+        httpReplies.push_back({"/playback-authorization", 204, ""});
+        sync.refreshPlaybackAuthorization();
+    }
+    Preferences::failWrite = true;
+    httpReplies.push_back({"/playback-authorization", 403, ""});
+    sync.refreshPlaybackAuthorization();
+    assert(!sync.isPlaybackAuthorized());
+    assert(!restored.loadPlaybackAuthorization() && !restored.isPlaybackAuthorized());
+    httpReplies.push_back({"/playback-authorization", 204, ""});
+    sync.refreshPlaybackAuthorization();
+    assert(sync.isPlaybackAuthorized());
+    assert(!restored.loadPlaybackAuthorization() && !restored.isPlaybackAuthorized());
+    Preferences::failWrite = false;
+    httpReplies.push_back({"/playback-authorization", 204, ""});
+    sync.refreshPlaybackAuthorization();
+    assert(restored.loadPlaybackAuthorization() && restored.isPlaybackAuthorized());
+
+    for (const char *invalid : {"not-json", "{}", "{\"allowed\":true}", "{\"allowed\":\"true\"}"}) {
+        Preferences::values["echoes_play/authorization"] = invalid;
+        assert(!restored.loadPlaybackAuthorization() && !restored.isPlaybackAuthorized());
+    }
+    assert(liveHttpClients == 0 && httpReplies.empty());
+    std::cout << "PASS: offline permission persists by device/API; transient failures preserve it, denials revoke it\n";
+}
+
+void offlineControlTest(TestKeys &keys, DeviceAuthenticator &auth) {
+    resetFakes();
+    ScenarioSyncService sync(auth, "https://lab.example", "MAC");
+    seed(sync);
+    httpReplies.push_back({"/playback-authorization", 204, ""});
+    sync.refreshPlaybackAuthorization();
+    WiFi.state = 0;
+    keys.loaded = false;
+    clockNow = 1000;
+    ScenarioSyncService rebooted(auth, "https://lab.example", "MAC");
+    assert(rebooted.loadPersistedAssignments() && rebooted.loadPlaybackAuthorization());
+
+    EspAudioPlayer first(1, 2, 3, 4), second(5);
+    EspWifiAP ap;
+    std::atomic<int> playing{0};
+    std::vector<PlaybackEvent> events;
+    first.onPlayback([&](const PlaybackEvent &event) {
+        playing.store(event.type == PlaybackEvent::PLAY ? 1 : 0);
+        events.push_back(event);
+    });
+    QueueHandle_t commands = xQueueCreate(4, sizeof(AudioCommand));
+    ControlTaskContext control{&rebooted, &first, &second, &ap, &playing, commands};
+    GuardTaskContext guard{&rebooted, &first, &second, &playing};
+    struct Done {};
+    const auto runControl = [&] {
+        const uint32_t start = millis();
+        onDelay = [&] { if (static_cast<uint32_t>(millis() - start) >= 100) throw Done{}; };
+        try { controlTask(&control); } catch (const Done &) {}
+        onDelay = {};
+    };
+    const auto runGuard = [&] {
+        onDelay = [] { throw Done{}; };
+        try { guardTask(&guard); } catch (const Done &) {}
+        onDelay = {};
+    };
+    const auto calls = httpCalls.size();
+    AudioCommand press{AudioCommand::PRESS_1};
+    assert(xQueueSend(commands, &press, 0) == pdTRUE);
+    runControl();
+    assert(playing.load() == 1 && events.size() == 1);
+    runGuard();
+    assert(playing.load() == 1 && events.size() == 1 && httpCalls.size() == calls);
+    assert(events.front().type == PlaybackEvent::PLAY && std::strcmp(events.front().scenarioId, ID) == 0);
+
+    WiFi.state = WL_CONNECTED;
+    keys.loaded = true;
+    clockNow = 1795176000;
+    httpReplies.push_back({"/playback-authorization", 403, ""});
+    rebooted.refreshPlaybackAuthorization();
+    runGuard();
+    assert(playing.load() == 0 && events.size() == 2 && events.back().type == PlaybackEvent::STOP);
+    runGuard();
+    assert(events.size() == 2);
+    assert(xQueueSend(commands, &press, 0) == pdTRUE);
+    runControl();
+    assert(playing.load() == 0 && events.size() == 2 && httpCalls.size() == calls + 1);
+    vQueueDelete(commands);
+    std::cout << "PASS: sensor and guard play offline after reboot without JWT/HTTP; explicit denial stops playback\n";
 }
 
 void playbackTest() {
@@ -332,6 +474,8 @@ int main() {
     preflightTest(keys, auth);
     downloadsTest(auth);
     eventsApiTest(auth);
+    authorizationTest(auth);
     playbackTest();
+    offlineControlTest(keys, auth);
     std::cout << "PASS: downloads, rollback, API and player/queue contracts\n";
 }

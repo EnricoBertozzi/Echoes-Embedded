@@ -71,6 +71,13 @@ def main():
             ROOT / "src/application/service/ScenarioSyncService.cpp",
             ROOT / "src/infra/hardware/EspAudioPlayer.cpp",
         ]
+        main_source = (ROOT / "src/main.cpp").read_text()
+        audio_types = main_source.split("struct AudioCommand", 1)[1].split("// A generation", 1)[0]
+        control_types = main_source.split("struct ControlTaskContext", 1)[1].split("void audioTask(", 1)[0]
+        controls = main_source.split("void controlTask(", 1)[1].split("} // namespace", 1)[0]
+        (tmp / "controls-production.inc").write_text(
+            "struct AudioCommand" + audio_types + "struct ControlTaskContext" + control_types +
+            "void controlTask(" + controls)
         run(*compiler, *sources, "-Wl,--wrap=time", "-lcrypto", "-pthread", "-o", tmp / "contracts")
         output = run(tmp / "contracts")
         verify_jwt(output)
@@ -102,7 +109,6 @@ def main():
         run(*compiler, HOST / "registration.cpp", "-o", tmp / "registration")
         print(run(tmp / "registration").strip())
 
-        main_source = (ROOT / "src/main.cpp").read_text()
         tracker = main_source.split("class ConnectionTracker", 1)[1].split("struct ControlTaskContext", 1)[0]
         network = main_source.split("void syncTask(", 1)[1].split("void controlTask(", 1)[0]
         (tmp / "network-production.inc").write_text("class ConnectionTracker" + tracker + "void syncTask(" + network)

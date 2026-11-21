@@ -23,6 +23,8 @@ constexpr uint32_t REQUEST_TIMEOUT_MS = 5000;
 
 constexpr char NVS_NAMESPACE[] = "echoes_sync";
 constexpr char NVS_KEY[] = "manifest";
+constexpr char AUTH_NAMESPACE[] = "echoes_play";
+constexpr char AUTH_KEY[] = "authorization";
 
 // Each request owns its client; IDF decodes chunked bodies and validates HTTPS with the bundle.
 class ApiRequest {
@@ -535,6 +537,9 @@ bool ScenarioSyncService::sync() {
                         authenticator.issueToken(), REQUEST_TIMEOUT_MS);
         const int code = http.open("application/json");
 
+        if (code == 401 || code == 403) {
+            updatePlaybackAuthorization(false);
+        }
         if (code < 0) {
             Serial.println("[ScenarioSync] Manifest not received; see authentication/transport diagnostics");
         } else {
@@ -710,14 +715,76 @@ bool ScenarioSyncService::sync() {
     return complete;
 }
 
-bool ScenarioSyncService::authorizePlayback() {
-    if (WiFi.status() != WL_CONNECTED) {
+bool ScenarioSyncService::loadPlaybackAuthorization() {
+    playbackAuthorized_.store(false);
+    playbackAuthorizationDirty_ = false;
+    Preferences preferences;
+    if (!preferences.begin(AUTH_NAMESPACE, true)) {
         return false;
+    }
+    const String payload = preferences.getString(AUTH_KEY, "");
+    preferences.end();
+
+    JsonDocument doc;
+    if (deserializeJson(doc, payload) != DeserializationError::Ok ||
+        !doc["allowed"].is<bool>() ||
+        String(doc["hardwareId"] | "") != hardwareId ||
+        String(doc["apiBaseUrl"] | "") != apiBaseUrl) {
+        return false;
+    }
+    playbackAuthorized_.store(doc["allowed"].as<bool>());
+    Serial.printf("[PlaybackAuth] Restored from NVS: %s\n",
+                  isPlaybackAuthorized() ? "allowed" : "denied");
+    return true;
+}
+
+void ScenarioSyncService::updatePlaybackAuthorization(bool allowed) {
+    const bool previous = playbackAuthorized_.exchange(allowed);
+    playbackAuthorizationDirty_ = playbackAuthorizationDirty_ || previous != allowed;
+    if (!playbackAuthorizationDirty_) {
+        return;
+    }
+
+    JsonDocument doc;
+    doc["allowed"] = allowed;
+    doc["hardwareId"] = hardwareId;
+    doc["apiBaseUrl"] = apiBaseUrl;
+    String payload;
+    serializeJson(doc, payload);
+
+    Preferences preferences;
+    if (preferences.begin(AUTH_NAMESPACE, false)) {
+        playbackAuthorizationDirty_ =
+            preferences.putString(AUTH_KEY, payload) != payload.length();
+        // A failed revoke must not leave a usable grant if the old record can be removed.
+        if (playbackAuthorizationDirty_ && !allowed && preferences.remove(AUTH_KEY)) {
+            playbackAuthorizationDirty_ = false;
+        }
+        preferences.end();
+    }
+    if (playbackAuthorizationDirty_) {
+        Serial.println("[PlaybackAuth] Could not persist decision; will retry on next response");
+    }
+}
+
+void ScenarioSyncService::refreshPlaybackAuthorization() {
+    if (WiFi.status() != WL_CONNECTED) {
+        return;
     }
 
     ApiRequest http(apiBaseUrl + "/api/v1/devices/me/playback-authorization",
                     authenticator.issueToken(), 1800);
-    return http.open("application/json") == 204;
+    const int code = http.open("application/json");
+    if (code == 204) {
+        updatePlaybackAuthorization(true);
+        Serial.println("[PlaybackAuth] HTTP 204: playback allowed, including offline");
+    } else if (code == 401 || code == 403) {
+        updatePlaybackAuthorization(false);
+        Serial.printf("[PlaybackAuth] HTTP %d: playback denied\n", code);
+    } else {
+        Serial.printf("[PlaybackAuth] Check unavailable (%d); keeping previous decision: %s\n",
+                      code, isPlaybackAuthorized() ? "allowed" : "denied");
+    }
 }
 
 bool ScenarioSyncService::postEvent(

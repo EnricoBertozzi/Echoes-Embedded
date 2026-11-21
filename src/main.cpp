@@ -129,6 +129,7 @@ void audioTask(void *param) {
 
 void syncTask(void *param) {
     auto *ctx = static_cast<SyncTaskContext *>(param);
+    constexpr uint32_t AUTHORIZATION_INTERVAL_MS = 60 * 60 * 1000;
 
     vTaskDelay(pdMS_TO_TICKS(15000));
 
@@ -137,6 +138,8 @@ void syncTask(void *param) {
     uint32_t nextConnectionAttempt = millis();
     uint32_t nextEventAttempt = millis();
     uint32_t nextSync = millis();
+    uint32_t lastAuthorizationCheck = 0;
+    bool authorizationChecked = false;
     const auto due = [](uint32_t deadline) {
         return static_cast<int32_t>(millis() - deadline) >= 0;
     };
@@ -146,6 +149,7 @@ void syncTask(void *param) {
         if (current != generation) {
             generation = current;
             connectionAccepted = false;
+            authorizationChecked = false;
             nextConnectionAttempt = nextEventAttempt = nextSync = millis();
         }
         if (ctx->wifi->isConnected()) {
@@ -153,6 +157,12 @@ void syncTask(void *param) {
             if (!ctx->registration->isRegistered()) {
                 vTaskDelay(pdMS_TO_TICKS(100));
                 continue;
+            }
+            if (!authorizationChecked ||
+                static_cast<uint32_t>(millis() - lastAuthorizationCheck) >= AUTHORIZATION_INTERVAL_MS) {
+                ctx->service->refreshPlaybackAuthorization();
+                lastAuthorizationCheck = millis();
+                authorizationChecked = true;
             }
             if (!connectionAccepted && due(nextConnectionAttempt)) {
                 const bool accepted = ctx->service->postEvent("CONNECTION");
@@ -187,6 +197,7 @@ void syncTask(void *param) {
             }
         } else {
             connectionAccepted = false;
+            authorizationChecked = false;
             nextConnectionAttempt = millis();
         }
 
@@ -256,7 +267,7 @@ void controlTask(void *param) {
             continue;
         }
 
-        if (!ctx->service->authorizePlayback()) {
+        if (!ctx->service->isPlaybackAuthorized()) {
             Serial.printf(
                 "[FSR %d] Playback not authorized\n",
                 sensorIndex
@@ -267,9 +278,7 @@ void controlTask(void *param) {
             continue;
         }
 
-        // O evento de pressao ja foi detectado e passou pela
-        // autorizacao da API. Mesmo que o usuario solte o FSR
-        // durante a requisicao, reproduzir UMA vez ate o fim.
+        // A autorização é local; soltar o FSR não interrompe a faixa.
 
         Scenario selected{};
 
@@ -312,14 +321,14 @@ void guardTask(void *param) {
     while (true) {
         if (ctx->playingSensor->load() != 0) {
             const bool authorized =
-                ctx->service->authorizePlayback();
+                ctx->service->isPlaybackAuthorized();
 
             if (!authorized) {
                 ctx->audio1->stop();
                 ctx->audio2->stop();
 
                 Serial.println(
-                    "[PlaybackGuard] Playback blocked or connection lost"
+                    "[PlaybackGuard] Playback stopped: authorization revoked"
                 );
             }
         }
@@ -438,6 +447,7 @@ static void app_task(void *) {
 
     FileConsole fileConsole{storage};
 
+    scenarioSync.loadPlaybackAuthorization();
     if (filesystemReady) {
         scenarioSync.loadPersistedAssignments();
     }
