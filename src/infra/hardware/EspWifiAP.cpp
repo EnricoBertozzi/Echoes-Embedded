@@ -1,10 +1,43 @@
 #include "infra/hardware/EspWifiAP.hpp"
+#include <Preferences.h>
 #include <algorithm>
+#include <esp_random.h>
 #include <esp_wifi.h>
 
 namespace {
 // How often the driver station table is compared with the announced count.
 constexpr uint32_t RECONCILE_INTERVAL_MS = 1000;
+
+// Senha do AP de configuração: aleatória e única por aparelho, criada no
+// primeiro boot e guardada na NVS (S4 / RNF13). Sem caracteres ambíguos.
+constexpr size_t AP_PASSWORD_LEN = 12;
+constexpr char AP_PASSWORD_ALPHABET[] =
+    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+String loadOrCreateApPassword() {
+  Preferences prefs;
+  prefs.begin("echoes_ap", false);
+
+  String password = prefs.getString("pwd", "");
+  if (password.length() < 8) {
+    char buf[AP_PASSWORD_LEN + 1];
+    const size_t alphabetLen = sizeof(AP_PASSWORD_ALPHABET) - 1;
+
+    for (size_t i = 0; i < AP_PASSWORD_LEN; ++i) {
+      buf[i] = AP_PASSWORD_ALPHABET[esp_random() % alphabetLen];
+    }
+    buf[AP_PASSWORD_LEN] = '\0';
+
+    password = String(buf);
+    prefs.putString("pwd", password);
+
+    // exibida uma única vez para a equipe imprimir na etiqueta do aparelho
+    Serial.printf("[AP] Senha do setup gerada: %s\n", password.c_str());
+  }
+
+  prefs.end();
+  return password;
+}
 } // namespace
 
 EspWifiAP::EspWifiAP() {
@@ -39,7 +72,8 @@ void EspWifiAP::start() {
   }
 
   WiFi.softAPConfig(apIP, gateway, subnet);
-  WiFi.softAP("Echoes Setup", "echoes123456");
+  static const String apPassword = loadOrCreateApPassword();
+  WiFi.softAP("Echoes Setup", apPassword.c_str());
   dns.start(DNS_PORT, "*", apIP);
 
   running = true;

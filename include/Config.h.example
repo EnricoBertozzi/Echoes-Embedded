@@ -9,6 +9,8 @@
 #define WIFI_RECONNECT_INTERVAL_MS 30000
 
 // Backend API (Echoes-Server)
+// HTTPS obrigatório em produção. 1 = permite http:// (somente laboratório isolado) (S3)
+#define API_ALLOW_PLAIN_HTTP 1
 #define API_BASE_URL "http://192.168.1.50:8080"
 
 // FSR
