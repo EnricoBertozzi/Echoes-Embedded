@@ -81,6 +81,7 @@ struct SyncTaskContext {
     WifiSTAProxy *wifi;
     ConnectionTracker *connection;
     PlaybackEventQueue *events;
+    DeviceRegister *registration;
 };
 
 struct ControlTaskContext {
@@ -148,6 +149,11 @@ void syncTask(void *param) {
             nextConnectionAttempt = nextEventAttempt = nextSync = millis();
         }
         if (ctx->wifi->isConnected()) {
+            // Enrollment loads the key and starts SNTP before any authenticated HTTP work.
+            if (!ctx->registration->isRegistered()) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
             if (!connectionAccepted && due(nextConnectionAttempt)) {
                 const bool accepted = ctx->service->postEvent("CONNECTION");
                 // A 202 for an older link must not mark the current one sent.
@@ -553,7 +559,8 @@ static void app_task(void *) {
         &scenarioSync,
         &wifiSTA,
         &connectionTracker,
-        &playbackEvents
+        &playbackEvents,
+        &deviceRegister
     };
 
     if (filesystemReady) {

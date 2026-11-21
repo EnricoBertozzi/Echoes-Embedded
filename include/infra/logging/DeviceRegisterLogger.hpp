@@ -4,6 +4,7 @@
 
 class DeviceRegisterLogger : public DeviceRegisterObserver {
 public:
+  void onWaitingForConfiguration() override;
   void onGeneratingKey(const std::string &mac) override;
   void onKeyGenerationFailed() override;
   void onKeyLoaded() override;

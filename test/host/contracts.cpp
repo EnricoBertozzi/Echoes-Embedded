@@ -77,6 +77,7 @@ void resetFakes() {
     File::writeLimit = std::numeric_limits<size_t>::max();
     File::flushError = false;
     WiFi.state = WL_CONNECTED;
+    Serial.output.clear();
 }
 
 void jwtTest(TestKeys &keys, DeviceAuthenticator &auth) {
@@ -93,6 +94,40 @@ void jwtTest(TestKeys &keys, DeviceAuthenticator &auth) {
     std::cout << "TOKEN=" << auth.issueToken() << '\n';
     assert(clockReads == 1);
     std::cout << "PUBLIC=" << JwtBuilder::base64Url(keys.publicKeyPem()) << '\n';
+}
+
+void preflightTest(TestKeys &keys, DeviceAuthenticator &auth) {
+    resetFakes();
+    ScenarioSyncService sync(auth, "https://lab.example", "MAC");
+    for (int failure = 0; failure < 3; ++failure) {
+        keys.loaded = failure != 0;
+        clockNow = failure == 1 ? 1000 : 1795176000;
+        keys.signSucceeds = failure != 2;
+        Serial.output.clear();
+        assert(!sync.sync() && !sync.postEvent("CONNECTION") && !sync.authorizePlayback());
+        assert(httpCalls.empty() && liveHttpClients == 0);
+        const char *reason[] = {"key not loaded", "clock not synchronized", "signing failed"};
+        assert(Serial.output.find(reason[failure]) != std::string::npos);
+        assert(Serial.output.find("HTTP -1") == std::string::npos);
+    }
+    keys.signSucceeds = true;
+    ScenarioSyncService invalid(auth, "lab.example", "MAC");
+    assert(!invalid.sync());
+    assert(Serial.output.find("Invalid API_BASE_URL") != std::string::npos);
+    assert(httpCalls.empty());
+
+    for (bool openError : {true, false}) {
+        Serial.output.clear();
+        HttpReply reply{MANIFEST, 200, "{\"points\":[]}"};
+        reply.openError = openError;
+        reply.headerError = !openError;
+        httpReplies.push_back(reply);
+        assert(!sync.sync());
+        assert(Serial.output.find(openError ? "open failed" : "response headers failed") != std::string::npos);
+        assert(Serial.output.find("no HTTP response") != std::string::npos);
+        assert(httpReplies.empty() && liveHttpClients == 0);
+    }
+    std::cout << "PASS: missing key/clock/signature skips HTTP; transport failures identify their stage\n";
 }
 
 void seed(ScenarioSyncService &sync) {
@@ -294,6 +329,7 @@ int main() {
     TestKeys keys;
     DeviceAuthenticator auth(keys, "AA:bb:CC:01:02:03");
     jwtTest(keys, auth);
+    preflightTest(keys, auth);
     downloadsTest(auth);
     eventsApiTest(auth);
     playbackTest();

@@ -96,6 +96,12 @@ def main():
         run(*compiler, tmp / "ack.cpp", "-o", tmp / "ack")
         print(run(tmp / "ack").strip())
 
+        registration = register.split("void DeviceRegister::run()", 1)[1].split(
+            "DeviceRegister::RegisterResult DeviceRegister::registerDevice()", 1)[0]
+        (tmp / "registration-production.inc").write_text("void DeviceRegister::run()" + registration)
+        run(*compiler, HOST / "registration.cpp", "-o", tmp / "registration")
+        print(run(tmp / "registration").strip())
+
         main_source = (ROOT / "src/main.cpp").read_text()
         tracker = main_source.split("class ConnectionTracker", 1)[1].split("struct ControlTaskContext", 1)[0]
         network = main_source.split("void syncTask(", 1)[1].split("void controlTask(", 1)[0]

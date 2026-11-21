@@ -5,6 +5,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <esp_crt_bundle.h>
+#include <esp_err.h>
 #include <esp_http_client.h>
 #include <mbedtls/sha256.h>
 
@@ -28,8 +29,11 @@ class ApiRequest {
 public:
     ApiRequest(const String &url, const std::string &token, int timeoutMs)
         : url(url) {
-        if (token.empty() ||
-            (!url.startsWith("http://") && !url.startsWith("https://"))) {
+        if (token.empty()) {
+            return;
+        }
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            Serial.println("[DeviceAPI] Invalid API_BASE_URL: expected http:// or https://");
             return;
         }
 
@@ -39,12 +43,14 @@ public:
         config.crt_bundle_attach = esp_crt_bundle_attach;
         config.disable_auto_redirect = true;
         client = esp_http_client_init(&config);
-        if (client) {
+        if (!client) {
+            Serial.println("[DeviceAPI] HTTP client initialization failed");
+        } else {
             const std::string authorization = "Bearer " + token;
-            if (esp_http_client_set_header(client, "Authorization",
-                                           authorization.c_str()) != ESP_OK ||
-                esp_http_client_set_header(client, "Accept-Encoding",
-                                           "identity") != ESP_OK) {
+            if (!succeeded(esp_http_client_set_header(client, "Authorization",
+                           authorization.c_str()), "authorization header") ||
+                !succeeded(esp_http_client_set_header(client, "Accept-Encoding",
+                           "identity"), "encoding header")) {
                 esp_http_client_cleanup(client);
                 client = nullptr;
             }
@@ -62,16 +68,16 @@ public:
 
     int open(const char *accept, const String *body = nullptr) {
         if (!client ||
-            esp_http_client_set_header(client, "Accept", accept) != ESP_OK ||
-            esp_http_client_set_method(client, body ? HTTP_METHOD_POST
-                                                    : HTTP_METHOD_GET) != ESP_OK) {
+            !succeeded(esp_http_client_set_header(client, "Accept", accept), "accept header") ||
+            !succeeded(esp_http_client_set_method(client, body ? HTTP_METHOD_POST
+                                                    : HTTP_METHOD_GET), "method")) {
             return -1;
         }
-        if (body && esp_http_client_set_header(
-                        client, "Content-Type", "application/json") != ESP_OK) {
+        if (body && !succeeded(esp_http_client_set_header(
+                        client, "Content-Type", "application/json"), "content type")) {
             return -1;
         }
-        if (esp_http_client_open(client, body ? body->length() : 0) != ESP_OK) {
+        if (!succeeded(esp_http_client_open(client, body ? body->length() : 0), "open")) {
             return -1;
         }
         if (body) {
@@ -80,12 +86,14 @@ public:
                 const int written = esp_http_client_write(
                     client, body->c_str() + sent, body->length() - sent);
                 if (written <= 0) {
+                    succeeded(ESP_FAIL, "request body");
                     return -1;
                 }
                 sent += written;
             }
         }
         if (esp_http_client_fetch_headers(client) < 0) {
+            succeeded(ESP_FAIL, "response headers");
             return -1;
         }
         return esp_http_client_get_status_code(client);
@@ -131,6 +139,15 @@ public:
     }
 
 private:
+    bool succeeded(esp_err_t result, const char *stage) const {
+        if (result == ESP_OK) {
+            return true;
+        }
+        Serial.printf("[DeviceAPI] %s failed: %s (errno=%d); no HTTP response\n",
+                      stage, esp_err_to_name(result), esp_http_client_get_errno(client));
+        return false;
+    }
+
     const String url;
     esp_http_client_handle_t client = nullptr;
 };
@@ -518,7 +535,11 @@ bool ScenarioSyncService::sync() {
                         authenticator.issueToken(), REQUEST_TIMEOUT_MS);
         const int code = http.open("application/json");
 
-        Serial.printf("[ScenarioSync] Manifest GET: %d\n", code);
+        if (code < 0) {
+            Serial.println("[ScenarioSync] Manifest not received; see authentication/transport diagnostics");
+        } else {
+            Serial.printf("[ScenarioSync] Manifest GET: %d\n", code);
+        }
         if (code != 200 || !http.readManifest(payload)) {
             return false;
         }
@@ -727,6 +748,10 @@ bool ScenarioSyncService::postEvent(
     ApiRequest http(apiBaseUrl + "/api/v1/devices/me/events",
                     authenticator.issueToken(), 1800);
     const int code = http.open("application/json", &body);
-    Serial.printf("[ScenarioSync] Event %s -> HTTP %d\n", type, code);
+    if (code < 0) {
+        Serial.printf("[ScenarioSync] Event %s not accepted; no HTTP response\n", type);
+    } else {
+        Serial.printf("[ScenarioSync] Event %s -> HTTP %d\n", type, code);
+    }
     return code == 202;
 }

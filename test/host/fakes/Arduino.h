@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -31,8 +32,13 @@ public:
 };
 
 struct SerialFake {
-    void println(const char *) {}
-    template <typename... Args> void printf(const char *, Args...) {}
+    std::string output;
+    void println(const char *message) { output += std::string(message) + "\n"; }
+    template <typename... Args> void printf(const char *format, Args... args) {
+        char buffer[1024];
+        std::snprintf(buffer, sizeof(buffer), format, args...);
+        output += buffer;
+    }
 };
 inline SerialFake Serial;
 inline uint32_t fakeMillis = 0;

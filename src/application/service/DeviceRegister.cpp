@@ -118,6 +118,7 @@ void DeviceRegister::taskEntry(void *param) {
 
 void DeviceRegister::run() {
   bool ready = false;
+  bool waitingForConfiguration = false;
 
   while (true) {
     // A failed round retries at the configured MQTT interval. After a
@@ -126,12 +127,16 @@ void DeviceRegister::run() {
         ready ? WAKE_INTERVAL_MS : MQTT_RECONNECT_INTERVAL_MS;
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
 
-    // Never use the radio for MQTT while the setup AP is in use, and never
-    // register before the STA link is up.
-    const bool nowReady = wifiSTA.isConnected() &&
-                          !configurationMode.isActive() &&
-                          !configurationMode.hasApClients();
-    if (!nowReady) {
+    const bool connected = wifiSTA.isConnected();
+    const bool configuring = configurationMode.isActive();
+    if (connected && configuring && !waitingForConfiguration) {
+      for (auto *o : observers) {
+        o->onWaitingForConfiguration();
+      }
+    }
+    waitingForConfiguration = connected && configuring;
+    // An idle phone may remain associated; only active portal use defers enrollment.
+    if (!connected || configuring) {
       ready = false;
       continue;
     }
@@ -139,8 +144,8 @@ void DeviceRegister::run() {
       continue;
     }
 
-    // Radio quiet for the whole round: clock sync, TLS registration and the
-    // access token.
+    // Keep HTTP idle while the registration task loads or replaces its in-memory key.
+    registered.store(false);
     for (auto *o : observers) {
       o->onRegistering();
     }
@@ -148,6 +153,7 @@ void DeviceRegister::run() {
     const RegisterResult result = registerDevice();
 
     if (result == RegisterResult::Registered) {
+      registered.store(true);
       ready = true;
       if (keys.isLoaded()) {
         logAccessToken();

@@ -7,8 +7,8 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <esp_err.h>
 
-constexpr int ESP_OK = 0;
 enum esp_http_client_method_t { HTTP_METHOD_GET, HTTP_METHOD_POST };
 struct esp_http_client_config_t {
     const char *url = nullptr;
@@ -67,6 +67,7 @@ inline int esp_http_client_set_method(esp_http_client_handle_t c, esp_http_clien
     return ESP_OK;
 }
 inline int esp_http_client_open(esp_http_client_handle_t c, int) { return c->reply.openError ? -1 : 0; }
+inline int esp_http_client_get_errno(esp_http_client_handle_t) { return 0; }
 inline int esp_http_client_write(esp_http_client_handle_t c, const char *body, int size) {
     const int n = std::min(size, 7); // exercise partial request writes
     c->call.body.append(body, n);

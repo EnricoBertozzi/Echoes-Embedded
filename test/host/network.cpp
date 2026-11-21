@@ -10,15 +10,20 @@
 struct WifiSTAProxy {
     bool isConnected() { return WiFi.status() == WL_CONNECTED; }
 };
+struct DeviceRegister {
+    bool accepted = false;
+    bool isRegistered() const { return accepted; }
+};
 struct ScenarioSyncService {
     std::vector<std::string> calls;
+    int syncs = 0;
     std::function<bool(const char *)> report;
     bool postEvent(const char *type, const String &id = String()) {
         assert(id.empty() == (std::strcmp(type, "CONNECTION") == 0));
         calls.emplace_back(type);
         return report(type);
     }
-    bool sync() { return true; }
+    bool sync() { ++syncs; return true; }
 };
 
 #include "network-production.inc"
@@ -29,7 +34,8 @@ int main() {
     WifiSTAProxy wifi;
     PlaybackEventQueue events;
     ScenarioSyncService service;
-    SyncTaskContext context{&service, &wifi, &connection, &events};
+    DeviceRegister registration;
+    SyncTaskContext context{&service, &wifi, &connection, &events, &registration};
     PlaybackEvent event;
     std::strcpy(event.scenarioId, "12345678-1234-1234-1234-123456789abc");
     assert(events.enqueue(event));
@@ -38,6 +44,7 @@ int main() {
     int connections = 0, plays = 0, stops = 0;
     bool reconnected = false;
     service.report = [&](const char *type) {
+        assert(registration.accepted);
         if (std::strcmp(type, "CONNECTION") == 0) {
             ++connections;
             if (connections == 1) return false;
@@ -56,6 +63,10 @@ int main() {
     };
     onDelay = [&] {
         assert(millis() < 60000); // detect stuck retries without sleeping
+        if (!registration.accepted) {
+            assert(service.calls.empty() && service.syncs == 0);
+            if (millis() >= 16000) registration.accepted = true;
+        }
         if (stops == 1 && !reconnected) {
             reconnected = true;
             // This entire cycle occurs between two task iterations.
@@ -71,5 +82,5 @@ int main() {
     assert(!events.peek(event));
     assert((service.calls == std::vector<std::string>{
         "CONNECTION", "CONNECTION", "CONNECTION", "PLAY", "PLAY", "STOP", "CONNECTION"}));
-    std::cout << "PASS: connection acceptance/generation and ordered HTTP retries\n";
+    std::cout << "PASS: HTTP waits for enrollment; connection acceptance/generation and ordered retries\n";
 }
