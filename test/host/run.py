@@ -61,7 +61,7 @@ def main():
         tmp = Path(tmp)
         compiler = [
             os.environ.get("CXX", "g++"), "-std=c++17", "-g", "-O1", "-Wall", "-Wextra",
-            "-DARDUINOJSON_ENABLE_ARDUINO_STRING=1",
+            "-DARDUINOJSON_ENABLE_ARDUINO_STRING=1", "-DAPI_ALLOW_PLAIN_HTTP=1",
             "-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0", "-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0",
             f"-I{HOST / 'fakes'}", f"-I{ROOT / 'include'}", f"-I{json_include}", f"-I{tmp}",
         ]

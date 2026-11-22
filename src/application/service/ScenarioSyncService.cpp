@@ -1,5 +1,6 @@
 
 #include "application/service/ScenarioSyncService.hpp"
+#include "application/service/ApiUrl.hpp"
 
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -34,8 +35,8 @@ public:
         if (token.empty()) {
             return;
         }
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            Serial.println("[DeviceAPI] Invalid API_BASE_URL: expected http:// or https://");
+        if (!isAllowedApiUrl(url)) {
+            Serial.println("[DeviceAPI] Invalid API_BASE_URL: https:// required (http:// only with API_ALLOW_PLAIN_HTTP 1)");
             return;
         }
 

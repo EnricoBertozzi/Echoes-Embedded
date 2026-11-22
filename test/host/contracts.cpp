@@ -1,4 +1,5 @@
 #include "application/security/JwtBuilder.hpp"
+#include "application/service/ApiUrl.hpp"
 #include "application/service/PlaybackEventQueue.hpp"
 #include "application/service/ScenarioSyncService.hpp"
 #include "infra/hardware/EspAudioPlayer.hpp"
@@ -467,7 +468,22 @@ void playbackTest() {
     assert(count == 16);
 }
 
+void apiUrlTest() {
+    // produção: só HTTPS
+    assert(isAllowedApiUrl("https://api.exemplo.com", false));
+    assert(isAllowedApiUrl("https://api.exemplo.com/", false));
+    assert(!isAllowedApiUrl("http://api.exemplo.com", false));
+    assert(!isAllowedApiUrl("ftp://api.exemplo.com", false));
+    assert(!isAllowedApiUrl("", false));
+    assert(!isAllowedApiUrl("api.exemplo.com", false));
+    // laboratório isolado: HTTP liberado, mas nunca outro esquema
+    assert(isAllowedApiUrl("http://192.168.0.2:8080", true));
+    assert(isAllowedApiUrl("https://api.exemplo.com", true));
+    assert(!isAllowedApiUrl("ws://192.168.0.2", true));
+}
+
 int main() {
+    apiUrlTest();
     TestKeys keys;
     DeviceAuthenticator auth(keys, "AA:bb:CC:01:02:03");
     jwtTest(keys, auth);
@@ -477,5 +493,6 @@ int main() {
     authorizationTest(auth);
     playbackTest();
     offlineControlTest(keys, auth);
+    std::cout << "PASS: HTTPS required by default; plain HTTP only when explicitly allowed\n";
     std::cout << "PASS: downloads, rollback, API and player/queue contracts\n";
 }
