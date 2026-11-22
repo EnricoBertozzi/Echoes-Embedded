@@ -42,11 +42,12 @@ std::string trimmed(std::string s) {
 std::string ackTopicFor(const std::string &mac) {
   std::string topic(MQTT_ACK_TOPIC);
   // {mac} is the legacy placeholder, still accepted for old .env files.
-  for (const char *placeholder : {"{hardware_id}", "{mac}"}) {
+  for (const char *placeholder : {"{hardware_id}", "{hardwareId}", "{mac}"}) {
     const std::string token(placeholder);
-    const size_t pos = topic.find(token);
-    if (pos != std::string::npos) {
+    size_t pos = 0;
+    while ((pos = topic.find(token, pos)) != std::string::npos) {
       topic.replace(pos, token.size(), mac);
+      pos += mac.size();
     }
   }
   return topic;
@@ -117,6 +118,7 @@ void DeviceRegister::taskEntry(void *param) {
 
 void DeviceRegister::run() {
   bool ready = false;
+  bool waitingForConfiguration = false;
 
   while (true) {
     // A failed round retries at the configured MQTT interval. After a
@@ -125,12 +127,16 @@ void DeviceRegister::run() {
         ready ? WAKE_INTERVAL_MS : MQTT_RECONNECT_INTERVAL_MS;
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
 
-    // Never use the radio for MQTT while the setup AP is in use, and never
-    // register before the STA link is up.
-    const bool nowReady = wifiSTA.isConnected() &&
-                          !configurationMode.isActive() &&
-                          !configurationMode.hasApClients();
-    if (!nowReady) {
+    const bool connected = wifiSTA.isConnected();
+    const bool configuring = configurationMode.isActive();
+    if (connected && configuring && !waitingForConfiguration) {
+      for (auto *o : observers) {
+        o->onWaitingForConfiguration();
+      }
+    }
+    waitingForConfiguration = connected && configuring;
+    // An idle phone may remain associated; only active portal use defers enrollment.
+    if (!connected || configuring) {
       ready = false;
       continue;
     }
@@ -138,8 +144,8 @@ void DeviceRegister::run() {
       continue;
     }
 
-    // Radio quiet for the whole round: clock sync, TLS registration and the
-    // access token.
+    // Keep HTTP idle while the registration task loads or replaces its in-memory key.
+    registered.store(false);
     for (auto *o : observers) {
       o->onRegistering();
     }
@@ -147,6 +153,7 @@ void DeviceRegister::run() {
     const RegisterResult result = registerDevice();
 
     if (result == RegisterResult::Registered) {
+      registered.store(true);
       ready = true;
       if (keys.isLoaded()) {
         logAccessToken();
@@ -231,7 +238,11 @@ DeviceRegister::RegisterResult DeviceRegister::registerDevice() {
 
   std::string ack;
   if (!waitForAck(ack, 15000)) {
-    retryLater(generated, "no registration ack (is the platform online?)");
+    const std::string reason =
+        "no registration ack; publish=" + std::string(MQTT_REGISTRATION_TOPIC) +
+        ", subscribe=" + ackTopicFor(mac) +
+        "; check platform and broker permissions for both clients";
+    retryLater(generated, reason.c_str());
     return RegisterResult::Retry;
   }
 

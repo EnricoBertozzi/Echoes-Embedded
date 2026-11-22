@@ -37,7 +37,7 @@ def int_flag(name):
         print(f'-D{name}={value}')
 
 
-string_flag('API_HOST')
+string_flag('API_BASE_URL')
 string_flag('MQTT_BROKER_URL')
 string_flag('MQTT_CLIENT_ID')
 string_flag('MQTT_USERNAME')

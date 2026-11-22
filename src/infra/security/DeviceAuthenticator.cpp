@@ -1,5 +1,6 @@
 #include "infra/security/DeviceAuthenticator.hpp"
 #include "application/security/JwtBuilder.hpp"
+#include <Arduino.h>
 #include <time.h>
 
 namespace {
@@ -14,11 +15,13 @@ DeviceAuthenticator::DeviceAuthenticator(DeviceKeys &keys, std::string mac)
 
 std::string DeviceAuthenticator::issueToken() {
   if (!keys.isLoaded()) {
+    Serial.println("[DeviceAuth] JWT unavailable: device key not loaded; waiting for enrollment");
     return {};
   }
 
   const time_t now = time(nullptr);
   if (now < MIN_VALID_TIME) {
+    Serial.println("[DeviceAuth] JWT unavailable: clock not synchronized; check SNTP connectivity");
     return {};
   }
 
@@ -37,12 +40,14 @@ std::string DeviceAuthenticator::issueToken() {
 
   std::string der;
   if (!keys.sign(signingInput, der)) {
+    Serial.println("[DeviceAuth] JWT unavailable: ES256 signing failed");
     return {};
   }
 
   // ES256 JWTs carry the signature as raw R || S (JOSE), not DER.
   const std::string jose = JwtBuilder::derToJose(der);
   if (jose.size() != 64) {
+    Serial.println("[DeviceAuth] JWT unavailable: invalid ES256 signature encoding");
     return {};
   }
 

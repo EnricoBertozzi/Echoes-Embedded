@@ -1,5 +1,7 @@
 #include "infra/hardware/EspAudioPlayer.hpp"
 #include <Arduino.h>
+#include <cstring>
+#include <utility>
 
 bool EspAudioPlayer::audioBusy = false;
 AudioOutputI2S *EspAudioPlayer::output = nullptr;
@@ -31,6 +33,19 @@ EspAudioPlayer::EspAudioPlayer(int sdMode) : sdMode(sdMode) {
 }
 
 bool EspAudioPlayer::play(const Scenario &scenario) {
+  return play(scenario, nullptr);
+}
+
+void EspAudioPlayer::onPlayback(EventHandler handler) {
+  xSemaphoreTake(audioMutex, portMAX_DELAY);
+  eventHandler = std::move(handler);
+  xSemaphoreGive(audioMutex);
+}
+
+bool EspAudioPlayer::play(const Scenario &scenario, const char *scenarioId) {
+  if (scenarioId && std::strlen(scenarioId) != 36) {
+    return false;
+  }
   xSemaphoreTake(audioMutex, portMAX_DELAY);
 
   if (audioBusy) {
@@ -63,6 +78,14 @@ bool EspAudioPlayer::play(const Scenario &scenario) {
   activePlayer = this;
   audioBusy = true;
   startedAtMs = millis();
+  playbackEvent = {};
+  if (scenarioId) {
+    std::memcpy(playbackEvent.scenarioId, scenarioId, 36);
+  }
+  playbackEvent.type = PlaybackEvent::PLAY;
+  if (eventHandler) {
+    eventHandler(playbackEvent);
+  }
 
   Serial.printf("[AUDIO] MP3 iniciado, AMP GPIO=%d, gain=1.0\n", sdMode);
   xSemaphoreGive(audioMutex);
@@ -90,13 +113,14 @@ bool EspAudioPlayer::loop() {
 bool EspAudioPlayer::stop() {
   xSemaphoreTake(audioMutex, portMAX_DELAY);
 
-  if (activePlayer == this) {
+  const bool stopped = activePlayer == this;
+  if (stopped) {
     Serial.println("[AUDIO] Encerrando player ativo");
     stopInternal();
   }
 
   xSemaphoreGive(audioMutex);
-  return true;
+  return stopped;
 }
 
 void EspAudioPlayer::stopInternal() {
@@ -120,5 +144,10 @@ void EspAudioPlayer::stopInternal() {
   if (activePlayer == this) {
     activePlayer = nullptr;
     audioBusy = false;
+    playbackEvent.type = PlaybackEvent::STOP;
+    if (eventHandler) {
+      eventHandler(playbackEvent);
+    }
+    playbackEvent = {};
   }
 }

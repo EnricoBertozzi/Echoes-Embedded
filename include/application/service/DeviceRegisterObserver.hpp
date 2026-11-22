@@ -8,6 +8,7 @@ public:
 
   // The MQTT round is starting: the radio is needed for TLS.
   virtual void onRegistering() {}
+  virtual void onWaitingForConfiguration() {}
   virtual void onGeneratingKey(const std::string &mac) {}
   virtual void onKeyGenerationFailed() {}
   virtual void onKeyLoaded() {}

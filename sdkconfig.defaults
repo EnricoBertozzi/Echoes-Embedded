@@ -1,2 +1,9 @@
 # Requerido pelo framework Arduino (esp32-arduino exige 1000 Hz)
 CONFIG_FREERTOS_HZ=1000
+
+# NetworkClientSecure (Arduino) só compila com cifras PSK habilitadas; HTTPS da API usa esse cliente
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# Flash real da placa (ESP32-D0WD-V3, esptool flash-id): 4 MB
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

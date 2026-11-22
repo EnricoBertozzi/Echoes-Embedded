@@ -35,27 +35,21 @@ public:
         uint8_t sensorIndex1Based
     ) const;
 
-    // Autorização de reprodução local (B2/RNF03): vale por 24 h após o último
-    // sync bem-sucedido e não faz HTTP. Sem rede o áudio continua tocando
-    // dentro dessa janela; 401/403 do backend a revogam imediatamente.
-    bool playbackAllowed() const;
+    bool loadPlaybackAuthorization();
 
-    // Envia eventos para o backend, quando utilizado.
-    void postEvent(
+    // Consulta local; nunca faz HTTP ao pressionar um sensor.
+    bool isPlaybackAuthorized() const { return playbackAuthorized_.load(); }
+
+    // A task de rede atualiza a permissão; falhas temporárias preservam a decisão anterior.
+    void refreshPlaybackAuthorization();
+
+    // Chamado pela task de rede; true somente quando a API aceita (202).
+    bool postEvent(
         const char *type,
-        const String &scenarioIdOrNullJson
+        const String &scenarioId = String()
     );
 
 private:
-    static constexpr unsigned long PLAYBACK_AUTH_TTL_MS =
-        24UL * 60UL * 60UL * 1000UL;
-
-    void markPlaybackAuthorized();
-    void revokePlaybackAuthorization();
-
-    std::atomic<bool> playbackAuthSeen_{false};
-    std::atomic<unsigned long> playbackAuthAtMs_{0};
-
     DeviceAuthenticator &authenticator;
 
     String apiBaseUrl;
@@ -64,6 +58,10 @@ private:
     mutable std::mutex assignmentsMutex;
 
     SensorScenarioAssignment assignments_[2];
+    std::atomic<bool> playbackAuthorized_{false};
+    bool playbackAuthorizationDirty_ = false;
+
+    void updatePlaybackAuthorization(bool allowed);
 
     bool ensureAudioDir();
 
@@ -80,4 +78,3 @@ private:
 
     size_t littleFsFreeBytes() const;
 };
-

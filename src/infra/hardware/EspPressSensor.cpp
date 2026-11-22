@@ -5,6 +5,8 @@
 
 EspPressSensor::EspPressSensor(int adcPin) : adcPin(adcPin) {
   pinMode(adcPin, INPUT);
+  // Arduino 3 initializes the ADC channel on its first read, before pin attenuation.
+  analogRead(adcPin);
   analogSetPinAttenuation(adcPin, ADC_11db);
 
   std::string taskName = "press-sensor-" + std::to_string(adcPin);

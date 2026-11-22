@@ -4,6 +4,7 @@
 #include "application/repository/ScenarioRepository.hpp"
 #include "application/service/ConfigurationMode.hpp"
 #include "application/service/DeviceRegister.hpp"
+#include "application/service/PlaybackEventQueue.hpp"
 #include "application/service/ScenarioSyncService.hpp"
 #include "application/service/ScanService.hpp"
 #include "application/service/WifiService.hpp"
@@ -64,12 +65,23 @@ struct AudioTaskContext {
     EspAudioPlayer *audio1;
     EspAudioPlayer *audio2;
     EspWifiAP *ap;
-    std::atomic<int> *playingSensor;
+};
+
+// A generation catches even disconnect/reconnect cycles while HTTP is blocked.
+class ConnectionTracker : public WifiSTAObserver {
+public:
+    std::atomic<uint32_t> generation{0};
+    void onConnect(const WifiScanDto &) override { ++generation; }
+    void onDisconnect(const WifiScanDto &) override { ++generation; }
+    void onError(const WifiScanDto &) override { ++generation; }
 };
 
 struct SyncTaskContext {
     ScenarioSyncService *service;
     WifiSTAProxy *wifi;
+    ConnectionTracker *connection;
+    PlaybackEventQueue *events;
+    DeviceRegister *registration;
 };
 
 struct ControlTaskContext {
@@ -96,8 +108,6 @@ void audioTask(void *param) {
             ctx->audio1->stop();
             ctx->audio2->stop();
 
-            ctx->playingSensor->store(0);
-
             vTaskDelay(pdMS_TO_TICKS(100));
         } else {
             // O retorno true sinaliza que o decodificador terminou.
@@ -106,13 +116,9 @@ void audioTask(void *param) {
             const bool finished2 = ctx->audio2->loop();
 
             if (finished1) {
-                int expected = 1;
-                ctx->playingSensor->compare_exchange_strong(expected, 0);
                 Serial.println("[FSR 1] Decoder encerrado");
             }
             if (finished2) {
-                int expected = 2;
-                ctx->playingSensor->compare_exchange_strong(expected, 0);
                 Serial.println("[FSR 2] Decoder encerrado");
             }
 
@@ -123,25 +129,79 @@ void audioTask(void *param) {
 
 void syncTask(void *param) {
     auto *ctx = static_cast<SyncTaskContext *>(param);
+    constexpr uint32_t AUTHORIZATION_INTERVAL_MS = 60 * 60 * 1000;
 
     vTaskDelay(pdMS_TO_TICKS(15000));
 
+    uint32_t generation = ctx->connection->generation.load();
+    bool connectionAccepted = false;
+    uint32_t nextConnectionAttempt = millis();
+    uint32_t nextEventAttempt = millis();
+    uint32_t nextSync = millis();
+    uint32_t lastAuthorizationCheck = 0;
+    bool authorizationChecked = false;
+    const auto due = [](uint32_t deadline) {
+        return static_cast<int32_t>(millis() - deadline) >= 0;
+    };
+
     while (true) {
+        const uint32_t current = ctx->connection->generation.load();
+        if (current != generation) {
+            generation = current;
+            connectionAccepted = false;
+            authorizationChecked = false;
+            nextConnectionAttempt = nextEventAttempt = nextSync = millis();
+        }
         if (ctx->wifi->isConnected()) {
-            Serial.println(
-                "[ScenarioSync] Starting synchronization"
-            );
+            // Enrollment loads the key and starts SNTP before any authenticated HTTP work.
+            if (!ctx->registration->isRegistered()) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+            if (!authorizationChecked ||
+                static_cast<uint32_t>(millis() - lastAuthorizationCheck) >= AUTHORIZATION_INTERVAL_MS) {
+                ctx->service->refreshPlaybackAuthorization();
+                lastAuthorizationCheck = millis();
+                authorizationChecked = true;
+            }
+            if (!connectionAccepted && due(nextConnectionAttempt)) {
+                const bool accepted = ctx->service->postEvent("CONNECTION");
+                // A 202 for an older link must not mark the current one sent.
+                connectionAccepted = accepted && ctx->wifi->isConnected() &&
+                    ctx->connection->generation.load() == generation;
+                nextConnectionAttempt = millis() + 5000;
+            }
+            if (ctx->connection->generation.load() != generation) {
+                continue;
+            }
 
-            const bool ok = ctx->service->sync();
+            PlaybackEvent event;
+            if (connectionAccepted && due(nextEventAttempt) &&
+                ctx->events->peek(event)) {
+                const bool accepted = ctx->service->postEvent(
+                    event.type == PlaybackEvent::PLAY ? "PLAY" : "STOP",
+                    String(event.scenarioId));
+                if (accepted) {
+                    ctx->events->accept();
+                }
+                nextEventAttempt = millis() + (accepted ? 0 : 5000);
+            }
 
-            Serial.println(
-                ok
+            if (due(nextSync)) {
+                Serial.println("[ScenarioSync] Starting synchronization");
+                const bool ok = ctx->service->sync();
+                Serial.println(ok
                     ? "[ScenarioSync] Success"
-                    : "[ScenarioSync] Failed; cached audio retained"
-            );
+                    : "[ScenarioSync] Failed; cached audio retained");
+                nextSync = millis() + 60000;
+            }
+        } else {
+            connectionAccepted = false;
+            authorizationChecked = false;
+            nextConnectionAttempt = millis();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -207,18 +267,18 @@ void controlTask(void *param) {
             continue;
         }
 
-        // autorização local (sem HTTP por toque): RNF02/RNF03
-        if (!ctx->service->playbackAllowed()) {
+        if (!ctx->service->isPlaybackAuthorized()) {
             Serial.printf(
                 "[FSR %d] Playback not authorized\n",
                 sensorIndex
             );
             continue;
         }
+        if (ctx->ap->countConnect() > 0) {
+            continue;
+        }
 
-        // O evento de pressao ja foi detectado e passou pela
-        // autorizacao da API. Mesmo que o usuario solte o FSR
-        // durante a requisicao, reproduzir UMA vez ate o fim.
+        // A autorização é local; soltar o FSR não interrompe a faixa.
 
         Scenario selected{};
 
@@ -240,9 +300,7 @@ void controlTask(void *param) {
             sizeof(selected.audio) - 1
         ] = '\0';
 
-        if (player->play(selected)) {
-            ctx->playingSensor->store(sensorIndex);
-
+        if (player->play(selected, assignment.scenarioId.c_str())) {
             Serial.printf(
                 "[FSR %d] Playing %s\n",
                 sensorIndex,
@@ -261,17 +319,18 @@ void guardTask(void *param) {
     auto *ctx = static_cast<GuardTaskContext *>(param);
 
     while (true) {
-        // só verifica a validade local: a renovação acontece no sync
-        if (ctx->playingSensor->load() != 0 &&
-            !ctx->service->playbackAllowed()) {
-            ctx->audio1->stop();
-            ctx->audio2->stop();
+        if (ctx->playingSensor->load() != 0) {
+            const bool authorized =
+                ctx->service->isPlaybackAuthorized();
 
-            ctx->playingSensor->store(0);
+            if (!authorized) {
+                ctx->audio1->stop();
+                ctx->audio2->stop();
 
-            Serial.println(
-                "[PlaybackGuard] Playback authorization expired or revoked"
-            );
+                Serial.println(
+                    "[PlaybackGuard] Playback stopped: authorization revoked"
+                );
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -384,9 +443,11 @@ static void app_task(void *) {
 
     DeviceRegisterLogger deviceRegisterLogger;
     MqttLogger mqttLogger;
+    ConnectionTracker connectionTracker;
 
     FileConsole fileConsole{storage};
 
+    scenarioSync.loadPlaybackAuthorization();
     if (filesystemReady) {
         scenarioSync.loadPersistedAssignments();
     }
@@ -414,6 +475,7 @@ static void app_task(void *) {
     wifiSTA.registerObserver(&wifiIndicator);
     wifiSTA.registerObserver(&scanService);
     wifiSTA.registerObserver(&deviceRegister);
+    wifiSTA.registerObserver(&connectionTracker);
 
     wifiAP.registerObserver(&apLogger);
 
@@ -470,12 +532,28 @@ static void app_task(void *) {
     EspAudioPlayer audio2{AMP_2};
 
     static std::atomic<int> playingSensor{0};
+    PlaybackEventQueue playbackEvents;
+    if (!playbackEvents.ready()) {
+        Serial.println("[Events] Could not create playback event queue");
+    }
+    const auto trackPlayback = [&](int sensorIndex, const PlaybackEvent &event) {
+        // Runs under the player mutex, including decoder EOF, so STOP cannot race PLAY.
+        playingSensor.store(event.type == PlaybackEvent::PLAY ? sensorIndex : 0);
+        if (!playbackEvents.enqueue(event)) {
+            Serial.println("[Events] Queue full; playback event pair dropped");
+        }
+    };
+    audio1.onPlayback([&](const PlaybackEvent &event) {
+        trackPlayback(1, event);
+    });
+    audio2.onPlayback([&](const PlaybackEvent &event) {
+        trackPlayback(2, event);
+    });
 
     static AudioTaskContext audioContext{
         &audio1,
         &audio2,
-        &wifiAP,
-        &playingSensor
+        &wifiAP
     };
 
     xTaskCreate(
@@ -489,7 +567,10 @@ static void app_task(void *) {
 
     static SyncTaskContext syncContext{
         &scenarioSync,
-        &wifiSTA
+        &wifiSTA,
+        &connectionTracker,
+        &playbackEvents,
+        &deviceRegister
     };
 
     if (filesystemReady) {
@@ -606,4 +687,3 @@ extern "C" void app_main(void) {
         nullptr
     );
 }
-

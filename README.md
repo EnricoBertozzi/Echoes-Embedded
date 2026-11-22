@@ -9,3 +9,12 @@ O projeto de um conjunto consiste no desenvolvimento de um simulador canino de b
 # Tecnologias
 * C++.
 * ESP-IDF
+
+# Reprodução offline e sincronização
+
+- Após um `204` de `/api/v1/devices/me/playback-authorization`, a permissão é salva na NVS para o dispositivo e a URL da API atuais.
+- Com permissão salva e MP3 sincronizado, os sensores reproduzem offline, inclusive após reiniciar, sem consulta HTTP ao pressionar.
+- A task de rede verifica a autorização ao conectar e a cada hora. Falha de rede, timeout ou erro temporário mantém a decisão anterior.
+- `401` ou `403` na autorização ou no manifesto revoga a permissão salva e interrompe a reprodução. Um dispositivo sem autorização anterior permanece bloqueado até receber `204`.
+- Cenários continuam sendo consultados por HTTP a cada 60 segundos quando conectado; offline é usado o último cenário baixado completamente.
+- No contrato atual do Echoes-Server, MQTT serve ao cadastro e seu ACK. Não há push MQTT de revogação ou mudança de cenário.

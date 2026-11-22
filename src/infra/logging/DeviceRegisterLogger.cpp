@@ -1,6 +1,10 @@
 #include "infra/logging/DeviceRegisterLogger.hpp"
 #include <Arduino.h>
 
+void DeviceRegisterLogger::onWaitingForConfiguration() {
+  Serial.println("[Register] setup portal active; close it or disconnect from the ESP32 AP to enroll");
+}
+
 void DeviceRegisterLogger::onGeneratingKey(const std::string &mac) {
   Serial.printf("[Register] no private.pem: generating an ES256 key pair "
                 "for %s\n",

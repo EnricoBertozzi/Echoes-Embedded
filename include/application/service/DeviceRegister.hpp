@@ -27,6 +27,7 @@ public:
   ~DeviceRegister() override;
 
   void begin();
+  bool isRegistered() const { return registered.load(); }
   void registerObserver(DeviceRegisterObserver *observer);
   void unregisterObserver(DeviceRegisterObserver *observer);
 
@@ -66,6 +67,7 @@ private:
   std::string ackPayload;
   std::atomic<bool> waiting{false};
   bool tokenLogged{false};
+  std::atomic<bool> registered{false};
   // True while the key in RAM was generated here and has not been stored yet.
   bool keyGenerated{false};
 };
