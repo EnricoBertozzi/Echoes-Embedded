@@ -168,8 +168,12 @@ void syncTask(void *param) {
             }
             if (!authorizationChecked ||
                 static_cast<uint32_t>(millis() - lastAuthorizationCheck) >= AUTHORIZATION_INTERVAL_MS) {
-                ctx->service->refreshPlaybackAuthorization();
-                lastAuthorizationCheck = millis();
+                const bool decided = ctx->service->refreshPlaybackAuthorization();
+                // Sem decisão do servidor (timeout/erro), tenta de novo em 15 s
+                // em vez de esperar a próxima revisão horária.
+                lastAuthorizationCheck = decided
+                    ? millis()
+                    : millis() - AUTHORIZATION_INTERVAL_MS + 15000;
                 authorizationChecked = true;
             }
             if (!connectionAccepted && due(nextConnectionAttempt)) {

@@ -811,13 +811,13 @@ void ScenarioSyncService::updatePlaybackAuthorization(bool allowed) {
     }
 }
 
-void ScenarioSyncService::refreshPlaybackAuthorization() {
+bool ScenarioSyncService::refreshPlaybackAuthorization() {
     if (WiFi.status() != WL_CONNECTED) {
-        return;
+        return false;
     }
 
     ApiRequest http(apiBaseUrl + "/api/v1/devices/me/playback-authorization",
-                    authenticator.issueToken(), 1800);
+                    authenticator.issueToken(), REQUEST_TIMEOUT_MS);
     const int code = http.open("application/json");
     if (code == 204) {
         const bool was = isPlaybackAuthorized();
@@ -827,11 +827,13 @@ void ScenarioSyncService::refreshPlaybackAuthorization() {
                        "Reprodução autorizada pela API (inclusive offline até a próxima revisão).");
         }
         Serial.println("[PlaybackAuth] HTTP 204: playback allowed, including offline");
+        return true;
     } else if (code == 401 || code == 403) {
         updatePlaybackAuthorization(false);
         REMOTE_LOG(Warn, Sync, "PLAYBACK_DENIED",
                    "API negou a reprodução (HTTP %d). Assinatura/licença da instituição inativa ou dispositivo bloqueado; o áudio não toca.", code);
         Serial.printf("[PlaybackAuth] HTTP %d: playback denied\n", code);
+        return true;
     } else {
         REMOTE_LOG(Warn, Net, "AUTH_CHECK_UNAVAILABLE",
                    "Não foi possível verificar a autorização (%d). Mantida a decisão anterior (%s); provável falha de rede/servidor.",
@@ -839,6 +841,7 @@ void ScenarioSyncService::refreshPlaybackAuthorization() {
         Serial.printf("[PlaybackAuth] Check unavailable (%d); keeping previous decision: %s\n",
                       code, isPlaybackAuthorized() ? "allowed" : "denied");
     }
+    return false;
 }
 
 bool ScenarioSyncService::flushLogs() {
@@ -929,7 +932,7 @@ bool ScenarioSyncService::postEvent(
     serializeJson(doc, body);
 
     ApiRequest http(apiBaseUrl + "/api/v1/devices/me/events",
-                    authenticator.issueToken(), 1800);
+                    authenticator.issueToken(), REQUEST_TIMEOUT_MS);
     const int code = http.open("application/json", &body);
     if (code < 0) {
         REMOTE_LOG(Warn, Net, "EVENT_NO_RESPONSE",
