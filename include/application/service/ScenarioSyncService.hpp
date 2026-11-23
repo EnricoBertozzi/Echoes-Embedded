@@ -43,6 +43,10 @@ public:
     // A task de rede atualiza a permissão; falhas temporárias preservam a decisão anterior.
     void refreshPlaybackAuthorization();
 
+    // Envia um lote de logs pendentes (RemoteLog). Chamado só pela task de rede,
+    // nunca durante um download. true = nada a enviar ou lote aceito/descartado.
+    bool flushLogs();
+
     // Chamado pela task de rede; true somente quando a API aceita (202).
     bool postEvent(
         const char *type,

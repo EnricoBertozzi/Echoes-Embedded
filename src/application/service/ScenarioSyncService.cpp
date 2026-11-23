@@ -1,6 +1,7 @@
 
 #include "application/service/ScenarioSyncService.hpp"
 #include "application/service/ApiUrl.hpp"
+#include "application/service/RemoteLog.hpp"
 
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -14,6 +15,7 @@
 #include <cerrno>
 #include <cctype>
 #include <cstring>
+#include <ctime>
 #include <string>
 
 namespace {
@@ -786,6 +788,68 @@ void ScenarioSyncService::refreshPlaybackAuthorization() {
         Serial.printf("[PlaybackAuth] Check unavailable (%d); keeping previous decision: %s\n",
                       code, isPlaybackAuthorized() ? "allowed" : "denied");
     }
+}
+
+bool ScenarioSyncService::flushLogs() {
+    constexpr size_t BATCH = 12;
+
+    if (WiFi.status() != WL_CONNECTED) {
+        return false;
+    }
+
+    RemoteLog &remote = RemoteLog::instance();
+    LogEntry batch[BATCH];
+    uint32_t dropped = 0;
+    const size_t count = remote.peekBatch(batch, BATCH, dropped);
+    if (count == 0) {
+        return true;
+    }
+
+    JsonDocument doc;
+    doc["bootId"] = remote.bootId();
+    doc["up"] = static_cast<uint32_t>(millis());
+    doc["dropped"] = dropped;
+    JsonArray events = doc["events"].to<JsonArray>();
+    for (size_t i = 0; i < count; ++i) {
+        JsonObject item = events.add<JsonObject>();
+        item["seq"] = batch[i].seq;
+        item["up"] = batch[i].uptimeMs;
+        if (batch[i].epoch != 0) {
+            char iso[24];
+            const time_t epoch = static_cast<time_t>(batch[i].epoch);
+            struct tm utc;
+            gmtime_r(&epoch, &utc);
+            strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &utc);
+            item["ts"] = iso;
+        }
+        item["lvl"] = RemoteLog::levelName(batch[i].level);
+        item["cat"] = RemoteLog::categoryName(batch[i].category);
+        item["code"] = batch[i].code;
+        item["msg"] = batch[i].message;
+        if (batch[i].count > 1) {
+            item["n"] = batch[i].count;
+        }
+    }
+    String body;
+    serializeJson(doc, body);
+
+    ApiRequest http(apiBaseUrl + "/api/v1/devices/me/logs",
+                    authenticator.issueToken(), REQUEST_TIMEOUT_MS);
+    const int code = http.open("application/json", &body);
+
+    // Falhas daqui só vão para a Serial: registrar remotamente criaria um laço.
+    if (code == 202) {
+        remote.commit(batch[count - 1].seq, dropped);
+        return true;
+    }
+    if (code == 400 || code == 413 || code == 422) {
+        // Lote que a API nunca aceitará; descarta para não travar a fila.
+        Serial.printf("[RemoteLog] Batch rejected (HTTP %d); discarded\n", code);
+        remote.discard(batch[count - 1].seq, dropped);
+        return true;
+    }
+    Serial.printf("[RemoteLog] Flush failed (HTTP %d); will retry\n", code);
+    return false;
 }
 
 bool ScenarioSyncService::postEvent(

@@ -11,6 +11,7 @@
 
 #include "domain/entity/Scenario.hpp"
 
+#include "application/service/RemoteLog.hpp"
 #include "infra/console/FileConsole.hpp"
 #include "infra/hardware/EspAudioPlayer.hpp"
 #include "infra/hardware/EspMacAddress.hpp"
@@ -44,6 +45,7 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <vector>
@@ -138,6 +140,11 @@ void syncTask(void *param) {
     uint32_t nextConnectionAttempt = millis();
     uint32_t nextEventAttempt = millis();
     uint32_t nextSync = millis();
+    // Logs remotos: lote a cada 30 s; backoff até 5 min se a API falhar.
+    constexpr uint32_t LOG_FLUSH_INTERVAL_MS = 30000;
+    constexpr uint32_t LOG_FLUSH_MAX_BACKOFF_MS = 300000;
+    uint32_t nextLogFlush = millis() + 5000;
+    uint32_t logFlushDelayMs = LOG_FLUSH_INTERVAL_MS;
     uint32_t lastAuthorizationCheck = 0;
     bool authorizationChecked = false;
     const auto due = [](uint32_t deadline) {
@@ -194,6 +201,15 @@ void syncTask(void *param) {
                     ? "[ScenarioSync] Success"
                     : "[ScenarioSync] Failed; cached audio retained");
                 nextSync = millis() + 60000;
+            }
+
+            // Sempre depois do sync: nunca disputa a rede com um download de MP3.
+            if (due(nextLogFlush)) {
+                const bool flushed = ctx->service->flushLogs();
+                logFlushDelayMs = flushed
+                    ? LOG_FLUSH_INTERVAL_MS
+                    : std::min(logFlushDelayMs * 2, LOG_FLUSH_MAX_BACKOFF_MS);
+                nextLogFlush = millis() + logFlushDelayMs;
             }
         } else {
             connectionAccepted = false;
