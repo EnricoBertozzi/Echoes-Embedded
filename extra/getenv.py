@@ -38,6 +38,7 @@ def int_flag(name):
 
 
 string_flag('API_BASE_URL')
+string_flag('API_TLS_SERVER_NAME')
 string_flag('MQTT_BROKER_URL')
 string_flag('MQTT_CLIENT_ID')
 string_flag('MQTT_USERNAME')

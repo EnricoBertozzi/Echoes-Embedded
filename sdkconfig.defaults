@@ -7,3 +7,9 @@ CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
 
 # Flash real da placa (ESP32-D0WD-V3, esptool flash-id): 4 MB
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# mbedTLS com buffers dinamicos: sem isso cada conexao HTTPS reserva ~20 KB fixos
+# (in 16 KB + out 4 KB) e falha com ALLOC_FAILED (-0x7F00) enquanto o MP3 toca.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y

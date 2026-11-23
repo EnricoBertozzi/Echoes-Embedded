@@ -1,6 +1,7 @@
 
 #include "application/service/ScenarioSyncService.hpp"
 #include "application/service/ApiUrl.hpp"
+#include "application/service/RemoteLog.hpp"
 
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -14,6 +15,7 @@
 #include <cerrno>
 #include <cctype>
 #include <cstring>
+#include <ctime>
 #include <string>
 
 namespace {
@@ -45,12 +47,18 @@ public:
         config.timeout_ms = timeoutMs;
         config.crt_bundle_attach = esp_crt_bundle_attach;
         config.disable_auto_redirect = true;
+        if (API_TLS_SERVER_NAME[0] != '\0') {
+            config.common_name = API_TLS_SERVER_NAME;
+        }
         client = esp_http_client_init(&config);
         if (!client) {
             Serial.println("[DeviceAPI] HTTP client initialization failed");
         } else {
             const std::string authorization = "Bearer " + token;
-            if (!succeeded(esp_http_client_set_header(client, "Authorization",
+            if ((API_TLS_SERVER_NAME[0] != '\0' &&
+                 !succeeded(esp_http_client_set_header(client, "Host",
+                            API_TLS_SERVER_NAME), "host header")) ||
+                !succeeded(esp_http_client_set_header(client, "Authorization",
                            authorization.c_str()), "authorization header") ||
                 !succeeded(esp_http_client_set_header(client, "Accept-Encoding",
                            "identity"), "encoding header")) {
@@ -429,6 +437,9 @@ bool ScenarioSyncService::downloadAndStoreAudio(
             "[ScenarioSync] Audio GET failed: %d\n",
             status
         );
+        REMOTE_LOG(Error, Sync, "AUDIO_DOWNLOAD_HTTP",
+                   "Download do áudio falhou (HTTP %d) cenário %.8s. -1 = queda/timeout de rede; 404 = arquivo não existe na API.",
+                   status, scenarioId.c_str());
         return false;
     }
 
@@ -445,6 +456,10 @@ bool ScenarioSyncService::downloadAndStoreAudio(
         Serial.println(
             "[ScenarioSync] Invalid audio size or insufficient storage"
         );
+        REMOTE_LOG(Error, Sync, "AUDIO_NO_SPACE",
+                   "Sem espaço ou tamanho inválido para o áudio %.8s (tam=%lld, livre=%u B). Remova cenários antigos ou reduza o MP3.",
+                   scenarioId.c_str(), static_cast<long long>(contentLen),
+                   static_cast<unsigned>(freeBytes));
         return false;
     }
 
@@ -455,6 +470,9 @@ bool ScenarioSyncService::downloadAndStoreAudio(
 
     if (!file) {
         const int openError = errno;
+        REMOTE_LOG(Error, System, "FS_OPEN_FAIL",
+                   "Não foi possível criar arquivo temporário na LittleFS (errno=%d). Sistema de arquivos cheio ou corrompido.",
+                   openError);
         Serial.printf(
             "[ScenarioSync] Temp file open failed: %s "
             "(errno=%d, free=%u bytes)\n",
@@ -504,6 +522,9 @@ bool ScenarioSyncService::downloadAndStoreAudio(
         Serial.println(
             "[ScenarioSync] Incomplete MP3; cached audio preserved"
         );
+        REMOTE_LOG(Error, Sync, "AUDIO_INCOMPLETE",
+                   "Download do MP3 %.8s incompleto (%u B recebidos). Conexão caiu ou flash cheia; o áudio anterior foi mantido.",
+                   scenarioId.c_str(), static_cast<unsigned>(received));
 
         return false;
     }
@@ -523,6 +544,9 @@ bool ScenarioSyncService::downloadAndStoreAudio(
         destinationPath.c_str(),
         static_cast<unsigned>(received)
     );
+    REMOTE_LOG(Info, Sync, "AUDIO_DOWNLOADED",
+               "Novo áudio baixado: cenário %.8s, %u bytes.",
+               scenarioId.c_str(), static_cast<unsigned>(received));
 
     return true;
 }
@@ -540,6 +564,15 @@ bool ScenarioSyncService::sync() {
 
         if (code == 401 || code == 403) {
             updatePlaybackAuthorization(false);
+            REMOTE_LOG(Error, Sync, "MANIFEST_DENIED",
+                       "API recusou o dispositivo (HTTP %d). Token inválido, relógio errado ou dispositivo bloqueado/não vinculado à instituição.", code);
+        } else if (code < 0) {
+            REMOTE_LOG(Error, Net, "MANIFEST_NO_RESPONSE",
+                       "Sem resposta da API ao buscar cenários. Verifique internet, DNS, certificado TLS e API_BASE_URL. Heap livre=%lu.",
+                       static_cast<unsigned long>(ESP.getFreeHeap()));
+        } else if (code != 200) {
+            REMOTE_LOG(Warn, Sync, "MANIFEST_HTTP_ERROR",
+                       "API respondeu HTTP %d ao buscar cenários. 5xx = falha no servidor; 404 = dispositivo/rota inexistente.", code);
         }
         if (code < 0) {
             Serial.println("[ScenarioSync] Manifest not received; see authentication/transport diagnostics");
@@ -558,6 +591,8 @@ bool ScenarioSyncService::sync() {
         Serial.println(
             "[ScenarioSync] Invalid manifest JSON"
         );
+        REMOTE_LOG(Error, Sync, "MANIFEST_INVALID",
+                   "Manifesto de cenários com JSON inválido ou truncado. Provável falha na API ou conexão instável.");
         return false;
     }
 
@@ -695,6 +730,8 @@ bool ScenarioSyncService::sync() {
         Serial.println(
             "[ScenarioSync] Failed to persist assignments"
         );
+        REMOTE_LOG(Error, System, "NVS_WRITE_FAIL",
+                   "Não foi possível salvar os cenários na NVS. Após reiniciar o dispositivo pode perder a associação dos sensores.");
         return false;
     }
 
@@ -711,6 +748,12 @@ bool ScenarioSyncService::sync() {
         Serial.println(
             "[ScenarioSync] Synchronization completed"
         );
+        if (changed) {
+            REMOTE_LOG(Info, Sync, "SCENARIOS_UPDATED",
+                       "Cenários atualizados: FSR1=%.8s, FSR2=%.8s.",
+                       next[0].has ? next[0].scenarioId.c_str() : "-",
+                       next[1].has ? next[1].scenarioId.c_str() : "-");
+        }
     }
 
     return complete;
@@ -768,24 +811,99 @@ void ScenarioSyncService::updatePlaybackAuthorization(bool allowed) {
     }
 }
 
-void ScenarioSyncService::refreshPlaybackAuthorization() {
+bool ScenarioSyncService::refreshPlaybackAuthorization() {
     if (WiFi.status() != WL_CONNECTED) {
-        return;
+        return false;
     }
 
     ApiRequest http(apiBaseUrl + "/api/v1/devices/me/playback-authorization",
-                    authenticator.issueToken(), 1800);
+                    authenticator.issueToken(), REQUEST_TIMEOUT_MS);
     const int code = http.open("application/json");
     if (code == 204) {
+        const bool was = isPlaybackAuthorized();
         updatePlaybackAuthorization(true);
+        if (!was) {
+            REMOTE_LOG(Info, Sync, "PLAYBACK_AUTHORIZED",
+                       "Reprodução autorizada pela API (inclusive offline até a próxima revisão).");
+        }
         Serial.println("[PlaybackAuth] HTTP 204: playback allowed, including offline");
+        return true;
     } else if (code == 401 || code == 403) {
         updatePlaybackAuthorization(false);
+        REMOTE_LOG(Warn, Sync, "PLAYBACK_DENIED",
+                   "API negou a reprodução (HTTP %d). Assinatura/licença da instituição inativa ou dispositivo bloqueado; o áudio não toca.", code);
         Serial.printf("[PlaybackAuth] HTTP %d: playback denied\n", code);
+        return true;
     } else {
+        REMOTE_LOG(Warn, Net, "AUTH_CHECK_UNAVAILABLE",
+                   "Não foi possível verificar a autorização (%d). Mantida a decisão anterior (%s); provável falha de rede/servidor.",
+                   code, isPlaybackAuthorized() ? "permitido" : "negado");
         Serial.printf("[PlaybackAuth] Check unavailable (%d); keeping previous decision: %s\n",
                       code, isPlaybackAuthorized() ? "allowed" : "denied");
     }
+    return false;
+}
+
+bool ScenarioSyncService::flushLogs() {
+    constexpr size_t BATCH = 12;
+
+    if (WiFi.status() != WL_CONNECTED) {
+        return false;
+    }
+
+    RemoteLog &remote = RemoteLog::instance();
+    LogEntry batch[BATCH];
+    uint32_t dropped = 0;
+    const size_t count = remote.peekBatch(batch, BATCH, dropped);
+    if (count == 0) {
+        return true;
+    }
+
+    JsonDocument doc;
+    doc["bootId"] = remote.bootId();
+    doc["up"] = static_cast<uint32_t>(millis());
+    doc["dropped"] = dropped;
+    JsonArray events = doc["events"].to<JsonArray>();
+    for (size_t i = 0; i < count; ++i) {
+        JsonObject item = events.add<JsonObject>();
+        item["seq"] = batch[i].seq;
+        item["up"] = batch[i].uptimeMs;
+        if (batch[i].epoch != 0) {
+            char iso[24];
+            const time_t epoch = static_cast<time_t>(batch[i].epoch);
+            struct tm utc;
+            gmtime_r(&epoch, &utc);
+            strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &utc);
+            item["ts"] = iso;
+        }
+        item["lvl"] = RemoteLog::levelName(batch[i].level);
+        item["cat"] = RemoteLog::categoryName(batch[i].category);
+        item["code"] = batch[i].code;
+        item["msg"] = batch[i].message;
+        if (batch[i].count > 1) {
+            item["n"] = batch[i].count;
+        }
+    }
+    String body;
+    serializeJson(doc, body);
+
+    ApiRequest http(apiBaseUrl + "/api/v1/devices/me/logs",
+                    authenticator.issueToken(), REQUEST_TIMEOUT_MS);
+    const int code = http.open("application/json", &body);
+
+    // Falhas daqui só vão para a Serial: registrar remotamente criaria um laço.
+    if (code == 202) {
+        remote.commit(batch[count - 1].seq, dropped);
+        return true;
+    }
+    if (code == 400 || code == 413 || code == 422) {
+        // Lote que a API nunca aceitará; descarta para não travar a fila.
+        Serial.printf("[RemoteLog] Batch rejected (HTTP %d); discarded\n", code);
+        remote.discard(batch[count - 1].seq, dropped);
+        return true;
+    }
+    Serial.printf("[RemoteLog] Flush failed (HTTP %d); will retry\n", code);
+    return false;
 }
 
 bool ScenarioSyncService::postEvent(
@@ -814,10 +932,17 @@ bool ScenarioSyncService::postEvent(
     serializeJson(doc, body);
 
     ApiRequest http(apiBaseUrl + "/api/v1/devices/me/events",
-                    authenticator.issueToken(), 1800);
+                    authenticator.issueToken(), REQUEST_TIMEOUT_MS);
     const int code = http.open("application/json", &body);
     if (code < 0) {
-        Serial.printf("[ScenarioSync] Event %s not accepted; no HTTP response\n", type);
+        REMOTE_LOG(Warn, Net, "EVENT_NO_RESPONSE",
+                   "Evento %s não enviado: sem resposta da API (heap livre=%lu, maior bloco=%lu). Falta de memória para TLS ou rede instável.",
+                   type, static_cast<unsigned long>(ESP.getFreeHeap()),
+                   static_cast<unsigned long>(ESP.getMaxAllocHeap()));
+        Serial.printf("[ScenarioSync] Event %s not accepted; no HTTP response (heap livre=%lu, maior bloco=%lu, minimo=%lu)\n",
+                      type, static_cast<unsigned long>(ESP.getFreeHeap()),
+                      static_cast<unsigned long>(ESP.getMaxAllocHeap()),
+                      static_cast<unsigned long>(ESP.getMinFreeHeap()));
     } else {
         Serial.printf("[ScenarioSync] Event %s -> HTTP %d\n", type, code);
     }

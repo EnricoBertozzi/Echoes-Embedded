@@ -11,6 +11,7 @@
 
 #include "domain/entity/Scenario.hpp"
 
+#include "application/service/RemoteLog.hpp"
 #include "infra/console/FileConsole.hpp"
 #include "infra/hardware/EspAudioPlayer.hpp"
 #include "infra/hardware/EspMacAddress.hpp"
@@ -38,12 +39,14 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
+#include <esp_system.h>
 #include <nvs_flash.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <vector>
@@ -138,6 +141,11 @@ void syncTask(void *param) {
     uint32_t nextConnectionAttempt = millis();
     uint32_t nextEventAttempt = millis();
     uint32_t nextSync = millis();
+    // Logs remotos: lote a cada 30 s; backoff até 5 min se a API falhar.
+    constexpr uint32_t LOG_FLUSH_INTERVAL_MS = 30000;
+    constexpr uint32_t LOG_FLUSH_MAX_BACKOFF_MS = 300000;
+    uint32_t nextLogFlush = millis() + 5000;
+    uint32_t logFlushDelayMs = LOG_FLUSH_INTERVAL_MS;
     uint32_t lastAuthorizationCheck = 0;
     bool authorizationChecked = false;
     const auto due = [](uint32_t deadline) {
@@ -160,8 +168,12 @@ void syncTask(void *param) {
             }
             if (!authorizationChecked ||
                 static_cast<uint32_t>(millis() - lastAuthorizationCheck) >= AUTHORIZATION_INTERVAL_MS) {
-                ctx->service->refreshPlaybackAuthorization();
-                lastAuthorizationCheck = millis();
+                const bool decided = ctx->service->refreshPlaybackAuthorization();
+                // Sem decisão do servidor (timeout/erro), tenta de novo em 15 s
+                // em vez de esperar a próxima revisão horária.
+                lastAuthorizationCheck = decided
+                    ? millis()
+                    : millis() - AUTHORIZATION_INTERVAL_MS + 15000;
                 authorizationChecked = true;
             }
             if (!connectionAccepted && due(nextConnectionAttempt)) {
@@ -194,6 +206,15 @@ void syncTask(void *param) {
                     ? "[ScenarioSync] Success"
                     : "[ScenarioSync] Failed; cached audio retained");
                 nextSync = millis() + 60000;
+            }
+
+            // Sempre depois do sync: nunca disputa a rede com um download de MP3.
+            if (due(nextLogFlush)) {
+                const bool flushed = ctx->service->flushLogs();
+                logFlushDelayMs = flushed
+                    ? LOG_FLUSH_INTERVAL_MS
+                    : std::min(logFlushDelayMs * 2, LOG_FLUSH_MAX_BACKOFF_MS);
+                nextLogFlush = millis() + logFlushDelayMs;
             }
         } else {
             connectionAccepted = false;
@@ -263,6 +284,9 @@ void controlTask(void *param) {
                 "[FSR %d] No synchronized audio\n",
                 sensorIndex
             );
+            REMOTE_LOG(Warn, Audio, "AUDIO_MISSING",
+                       "FSR %d acionado sem áudio local. Nenhum cenário associado ao sensor ou o MP3 ainda não foi baixado.",
+                       sensorIndex);
 
             continue;
         }
@@ -272,6 +296,9 @@ void controlTask(void *param) {
                 "[FSR %d] Playback not authorized\n",
                 sensorIndex
             );
+            REMOTE_LOG(Warn, Audio, "PLAY_NOT_AUTHORIZED",
+                       "FSR %d acionado mas a reprodução não está autorizada pela API (licença/instituição).",
+                       sensorIndex);
             continue;
         }
         if (ctx->ap->countConnect() > 0) {
@@ -311,6 +338,9 @@ void controlTask(void *param) {
                 "[FSR %d] MP3 decoder failed or busy\n",
                 sensorIndex
             );
+            REMOTE_LOG(Error, Audio, "DECODER_FAIL",
+                       "FSR %d: decoder MP3 falhou ou está ocupado. MP3 corrompido, heap baixo (%lu B) ou outro sensor tocando.",
+                       sensorIndex, static_cast<unsigned long>(ESP.getFreeHeap()));
         }
     }
 }
@@ -330,6 +360,8 @@ void guardTask(void *param) {
                 Serial.println(
                     "[PlaybackGuard] Playback stopped: authorization revoked"
                 );
+                REMOTE_LOG(Warn, Audio, "PLAY_REVOKED",
+                           "Reprodução interrompida: a autorização foi revogada durante o áudio.");
             }
         }
 
@@ -355,6 +387,32 @@ static void app_task(void *) {
     Serial.setRxBufferSize(1024);
     Serial.begin(115200);
 
+    {
+        const esp_reset_reason_t reason = esp_reset_reason();
+        const char *hint = "Reinício normal.";
+        LogLevel level = LogLevel::Info;
+        switch (reason) {
+        case ESP_RST_POWERON: hint = "Energia ligada."; break;
+        case ESP_RST_SW: hint = "Reinício por software."; break;
+        case ESP_RST_PANIC:
+            hint = "CRASH: exceção/panic no firmware. Pode ser falta de memória ou estouro de pilha.";
+            level = LogLevel::Error; break;
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:
+            hint = "Watchdog: alguma task travou ou ficou tempo demais sem ceder CPU.";
+            level = LogLevel::Error; break;
+        case ESP_RST_BROWNOUT:
+            hint = "Queda de tensão (brownout). Fonte/cabo USB fraco ou amplificador puxando corrente demais.";
+            level = LogLevel::Error; break;
+        default: break;
+        }
+        RemoteLog::instance().log(level, LogCategory::System, "BOOT",
+            "Dispositivo iniciou (motivo=%d). %s Heap livre=%lu B.",
+            static_cast<int>(reason), hint,
+            static_cast<unsigned long>(ESP.getFreeHeap()));
+    }
+
     analogReadResolution(12);
 
     // Não formatar a LittleFS automaticamente.
@@ -366,6 +424,8 @@ static void app_task(void *) {
         Serial.println(
             "[LittleFS] Mount failed; existing data preserved"
         );
+        REMOTE_LOG(Error, System, "FS_MOUNT_FAIL",
+                   "Falha ao montar a LittleFS: sem áudio nem chave. Os dados foram preservados; verifique a partição/flash. Sincronização desativada.");
     }
 
     EspWifiAP wifiAP;

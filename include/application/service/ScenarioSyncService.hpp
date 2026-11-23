@@ -41,7 +41,12 @@ public:
     bool isPlaybackAuthorized() const { return playbackAuthorized_.load(); }
 
     // A task de rede atualiza a permissão; falhas temporárias preservam a decisão anterior.
-    void refreshPlaybackAuthorization();
+    // true quando o servidor deu uma decisão definitiva (204/401/403).
+    bool refreshPlaybackAuthorization();
+
+    // Envia um lote de logs pendentes (RemoteLog). Chamado só pela task de rede,
+    // nunca durante um download. true = nada a enviar ou lote aceito/descartado.
+    bool flushLogs();
 
     // Chamado pela task de rede; true somente quando a API aceita (202).
     bool postEvent(
