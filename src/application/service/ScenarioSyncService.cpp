@@ -47,12 +47,18 @@ public:
         config.timeout_ms = timeoutMs;
         config.crt_bundle_attach = esp_crt_bundle_attach;
         config.disable_auto_redirect = true;
+        if (API_TLS_SERVER_NAME[0] != '\0') {
+            config.common_name = API_TLS_SERVER_NAME;
+        }
         client = esp_http_client_init(&config);
         if (!client) {
             Serial.println("[DeviceAPI] HTTP client initialization failed");
         } else {
             const std::string authorization = "Bearer " + token;
-            if (!succeeded(esp_http_client_set_header(client, "Authorization",
+            if ((API_TLS_SERVER_NAME[0] != '\0' &&
+                 !succeeded(esp_http_client_set_header(client, "Host",
+                            API_TLS_SERVER_NAME), "host header")) ||
+                !succeeded(esp_http_client_set_header(client, "Authorization",
                            authorization.c_str()), "authorization header") ||
                 !succeeded(esp_http_client_set_header(client, "Accept-Encoding",
                            "identity"), "encoding header")) {
