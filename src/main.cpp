@@ -39,6 +39,7 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
+#include <esp_system.h>
 #include <nvs_flash.h>
 
 #include <freertos/FreeRTOS.h>
@@ -279,6 +280,9 @@ void controlTask(void *param) {
                 "[FSR %d] No synchronized audio\n",
                 sensorIndex
             );
+            REMOTE_LOG(Warn, Audio, "AUDIO_MISSING",
+                       "FSR %d acionado sem áudio local. Nenhum cenário associado ao sensor ou o MP3 ainda não foi baixado.",
+                       sensorIndex);
 
             continue;
         }
@@ -288,6 +292,9 @@ void controlTask(void *param) {
                 "[FSR %d] Playback not authorized\n",
                 sensorIndex
             );
+            REMOTE_LOG(Warn, Audio, "PLAY_NOT_AUTHORIZED",
+                       "FSR %d acionado mas a reprodução não está autorizada pela API (licença/instituição).",
+                       sensorIndex);
             continue;
         }
         if (ctx->ap->countConnect() > 0) {
@@ -327,6 +334,9 @@ void controlTask(void *param) {
                 "[FSR %d] MP3 decoder failed or busy\n",
                 sensorIndex
             );
+            REMOTE_LOG(Error, Audio, "DECODER_FAIL",
+                       "FSR %d: decoder MP3 falhou ou está ocupado. MP3 corrompido, heap baixo (%lu B) ou outro sensor tocando.",
+                       sensorIndex, static_cast<unsigned long>(ESP.getFreeHeap()));
         }
     }
 }
@@ -346,6 +356,8 @@ void guardTask(void *param) {
                 Serial.println(
                     "[PlaybackGuard] Playback stopped: authorization revoked"
                 );
+                REMOTE_LOG(Warn, Audio, "PLAY_REVOKED",
+                           "Reprodução interrompida: a autorização foi revogada durante o áudio.");
             }
         }
 
@@ -371,6 +383,32 @@ static void app_task(void *) {
     Serial.setRxBufferSize(1024);
     Serial.begin(115200);
 
+    {
+        const esp_reset_reason_t reason = esp_reset_reason();
+        const char *hint = "Reinício normal.";
+        LogLevel level = LogLevel::Info;
+        switch (reason) {
+        case ESP_RST_POWERON: hint = "Energia ligada."; break;
+        case ESP_RST_SW: hint = "Reinício por software."; break;
+        case ESP_RST_PANIC:
+            hint = "CRASH: exceção/panic no firmware. Pode ser falta de memória ou estouro de pilha.";
+            level = LogLevel::Error; break;
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:
+            hint = "Watchdog: alguma task travou ou ficou tempo demais sem ceder CPU.";
+            level = LogLevel::Error; break;
+        case ESP_RST_BROWNOUT:
+            hint = "Queda de tensão (brownout). Fonte/cabo USB fraco ou amplificador puxando corrente demais.";
+            level = LogLevel::Error; break;
+        default: break;
+        }
+        RemoteLog::instance().log(level, LogCategory::System, "BOOT",
+            "Dispositivo iniciou (motivo=%d). %s Heap livre=%lu B.",
+            static_cast<int>(reason), hint,
+            static_cast<unsigned long>(ESP.getFreeHeap()));
+    }
+
     analogReadResolution(12);
 
     // Não formatar a LittleFS automaticamente.
@@ -382,6 +420,8 @@ static void app_task(void *) {
         Serial.println(
             "[LittleFS] Mount failed; existing data preserved"
         );
+        REMOTE_LOG(Error, System, "FS_MOUNT_FAIL",
+                   "Falha ao montar a LittleFS: sem áudio nem chave. Os dados foram preservados; verifique a partição/flash. Sincronização desativada.");
     }
 
     EspWifiAP wifiAP;
