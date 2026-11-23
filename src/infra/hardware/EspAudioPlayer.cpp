@@ -87,7 +87,9 @@ bool EspAudioPlayer::play(const Scenario &scenario, const char *scenarioId) {
     eventHandler(playbackEvent);
   }
 
-  Serial.printf("[AUDIO] MP3 iniciado, AMP GPIO=%d, gain=1.0\n", sdMode);
+  Serial.printf("[AUDIO] MP3 iniciado, AMP GPIO=%d, gain=1.0 (heap livre=%lu, maior bloco=%lu)\n",
+                sdMode, static_cast<unsigned long>(ESP.getFreeHeap()),
+                static_cast<unsigned long>(ESP.getMaxAllocHeap()));
   xSemaphoreGive(audioMutex);
   return true;
 }
